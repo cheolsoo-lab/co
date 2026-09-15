@@ -1,7 +1,7 @@
 import streamlit as st
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+import ta
 import time
 
 st.set_page_config(page_title="거래량 오더블록 & 리스크/레버리지 계산기", layout="wide")
@@ -37,10 +37,11 @@ def analyze_volume_ob_and_rsi(symbol, _exchange):
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        df['rsi'] = ta.rsi(df['close'], length=14)
-        df['rsi_sma50'] = ta.sma(df['rsi'], length=50)
-        df['rsi_sma200'] = ta.sma(df['rsi'], length=200)
-        df['vol_ma20'] = ta.sma(df['volume'], length=20)
+        # ta 라이브러리로 지표 계산 (Streamlit 호환성 확보)
+        df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+        df['rsi_sma50'] = ta.trend.sma_indicator(df['rsi'], window=50)
+        df['rsi_sma200'] = ta.trend.sma_indicator(df['rsi'], window=200)
+        df['vol_ma20'] = ta.trend.sma_indicator(df['volume'], window=20)
         
         df['vol_spike'] = df['volume'] > (df['vol_ma20'] * 1.8)
         
@@ -195,7 +196,7 @@ if not df_all.empty:
         "🎯 RSI 수렴/크로스"
     ])
 
-    # 🤖 AI 추천 포지션 (LONG / SHORT) 탭
+    # 🤖 AI 추천 포지션 (LONG / SHORT 중복 제거 수정 로직 반영)
     with tab_signal:
         st.subheader("💡 Top 30 + Volume OB + RSI 기반 추천 종목")
         st.caption("거래량 오더블록과 RSI 지표의 방향성이 일치(Confluence)하는 종목만 엄선하여 추천합니다.")
@@ -211,7 +212,7 @@ if not df_all.empty:
             is_bull_ob = "매수 지지대" in row['ob_status']
             is_bear_ob = "매도 저항대" in row['ob_status']
             
-            # LONG 조건: RSI 강세이면서 매도 저항대에 걸리지 않았거나, 확실한 매수 지지대 재진입 시
+            # LONG 조건 (SHORT 조건과 중복 차단)
             if (is_bull_trend and not is_bear_ob) or is_bull_ob:
                 sl = row['bull_ob_low'] * 0.985 if row['bull_ob_low'] > 0 else price * 0.96
                 tp = price + (price - sl) * 1.8
@@ -228,7 +229,7 @@ if not df_all.empty:
                     'rr': 1.8
                 })
                 
-            # SHORT 조건: RSI 약세이면서 매수 지지대에 걸리지 않았거나, 확실한 매도 저항대 진입 시 (LONG 조건과 중복 방지)
+            # SHORT 조건
             elif (is_bear_trend and not is_bull_ob) or is_bear_ob:
                 sl = row['bear_ob_high'] * 1.015 if row['bear_ob_high'] > 0 else price * 1.04
                 tp = price - (sl - price) * 1.8
