@@ -116,7 +116,7 @@ def analyze_volume_ob_and_rsi(symbol, _exchange):
 
 @st.cache_data(ttl=15)
 def load_market_data():
-    exchange = ccxt.binance({
+    exchange = ccxt.bybit({
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     })
