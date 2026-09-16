@@ -1,12 +1,17 @@
 import streamlit as st
 import ccxt
 import pandas as pd
+import numpy as np
 import ta
 import time
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy.signal import find_peaks
 
-st.set_page_config(page_title="거래량 오더블록 & 리스크/레버리지 계산기", layout="wide")
+st.set_page_config(page_title="🔥 크립토 정밀 차트 패턴 & Grid Search 대시보드", layout="wide")
 
-TOP_MAJORS = {'BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'AVAX', 'DOT', 'LINK', 'SUI', 'APT', 'BCH', 'MATIC', 'NEAR'}
+TOP_MAJORS = {'BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'AVAX', 'DOT', 'LINK', 'SUI', 'APT', 'BCH', 'NEAR'}
 
 SECTORS = {
     'AI / Big Data': {'NEAR', 'TAO', 'RENDER', 'RNDR', 'FET', 'AGIX', 'OCEAN', 'GRT', 'VIRTUAL', 'AKT', 'THETA'},
@@ -28,91 +33,9 @@ def get_sector_label(base_asset):
             return sector
     return ' 기타 알트'
 
-@st.cache_data(ttl=60)
-def analyze_volume_ob_and_rsi(symbol, _exchange):
-    try:
-        ohlcv = _exchange.fetch_ohlcv(symbol, timeframe='1d', limit=150)
-        if not ohlcv or len(ohlcv) < 60:
-            return None
-        
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-        df['rsi_sma50'] = ta.trend.sma_indicator(df['rsi'], window=50)
-        df['rsi_sma200'] = ta.trend.sma_indicator(df['rsi'], window=200)
-        df['vol_ma20'] = ta.trend.sma_indicator(df['volume'], window=20)
-        
-        df['vol_spike'] = df['volume'] > (df['vol_ma20'] * 1.8)
-        
-        latest_bull_ob = "없음"
-        latest_bear_ob = "없음"
-        bull_ob_low, bull_ob_high = 0.0, 0.0
-        bear_ob_low, bear_ob_high = 0.0, 0.0
-        ob_status = "일반"
-        
-        recent_df = df.iloc[-30:]
-        current_price = df.iloc[-1]['close']
-        
-        for i in range(len(recent_df)-1, 1, -1):
-            row = recent_df.iloc[i]
-            prev_row = recent_df.iloc[i-1]
-            
-            if row['vol_spike'] and row['close'] > row['open']:
-                bull_ob_low = float(min(prev_row['low'], row['low']))
-                bull_ob_high = float(row['high'])
-                latest_bull_ob = f"${bull_ob_low:,.2f} ~ ${bull_ob_high:,.2f}"
-                if bull_ob_low <= current_price <= bull_ob_high:
-                    ob_status = "🎯 매수 지지대 재진입 (OB Retest)"
-                break
-
-            elif row['vol_spike'] and row['close'] < row['open']:
-                bear_ob_low = float(row['low'])
-                bear_ob_high = float(max(prev_row['high'], row['high']))
-                latest_bear_ob = f"${bear_ob_low:,.2f} ~ ${bear_ob_high:,.2f}"
-                if bear_ob_low <= current_price <= bear_ob_high:
-                    ob_status = "⚠️ 매도 저항대 진입 (Bear OB)"
-                break
-
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        rsi_val = latest['rsi'] if not pd.isna(latest['rsi']) else 50.0
-        sma50 = latest['rsi_sma50'] if not pd.isna(latest['rsi_sma50']) else 50.0
-        sma200 = latest['rsi_sma200'] if not pd.isna(latest['rsi_sma200']) else 50.0
-        
-        prev_sma50 = prev['rsi_sma50'] if not pd.isna(prev['rsi_sma50']) else 50.0
-        prev_sma200 = prev['rsi_sma200'] if not pd.isna(prev['rsi_sma200']) else 50.0
-        
-        if prev_sma50 <= prev_sma200 and sma50 > sma200:
-            cross_status = "🚀 골든크로스"
-        elif prev_sma50 >= prev_sma200 and sma50 < sma200:
-            cross_status = "📉 데드크로스"
-        elif sma50 > sma200:
-            cross_status = "🟢 강세 추세"
-        else:
-            cross_status = "🔴 약세 추세"
-            
-        rsi_gap = abs(sma50 - sma200)
-        is_squeezed = "⚡ 수렴" if rsi_gap <= 2.5 else "일반"
-        
-        return {
-            'rsi': rsi_val,
-            'rsi_sma50': sma50,
-            'rsi_sma200': sma200,
-            'rsi_gap': rsi_gap,
-            'cross_status': cross_status,
-            'is_squeezed': is_squeezed,
-            'bull_ob': latest_bull_ob,
-            'bear_ob': latest_bear_ob,
-            'bull_ob_low': bull_ob_low,
-            'bull_ob_high': bull_ob_high,
-            'bear_ob_low': bear_ob_low,
-            'bear_ob_high': bear_ob_high,
-            'ob_status': ob_status
-        }
-    except Exception:
-        return None
-
+# ==========================================
+# 1. 거래소 데이터 로드 (다중 우회 Fallback)
+# ==========================================
 @st.cache_data(ttl=30)
 def load_market_data():
     exchanges_to_try = [
@@ -121,9 +44,7 @@ def load_market_data():
         ('Bybit', getattr(ccxt, 'bybit', None))
     ]
     
-    tickers = None
-    exchange = None
-
+    tickers, exchange = None, None
     for ex_name, ex_class in exchanges_to_try:
         if ex_class is None:
             continue
@@ -141,7 +62,6 @@ def load_market_data():
         return pd.DataFrame(), None
 
     market_data = []
-    
     for symbol, data in tickers.items():
         if not symbol.endswith('/USDT'):
             continue
@@ -157,8 +77,6 @@ def load_market_data():
         last_price = data.get('last')
         
         if high_24h and low_24h and last_price and high_24h > 0 and low_24h > 0:
-            volatility_pct = ((high_24h - low_24h) / low_24h) * 100
-            
             market_data.append({
                 'symbol': symbol,
                 'base': base_asset,
@@ -166,281 +84,368 @@ def load_market_data():
                 'high_24h': high_24h,
                 'low_24h': low_24h,
                 'last_price': last_price,
-                'volatility_pct': volatility_pct,
                 'sector': get_sector_label(base_asset),
                 'logo_url': get_crypto_logo_url(base_asset)
             })
 
     df = pd.DataFrame(market_data)
-    if df.empty:
-        return pd.DataFrame(), exchange
-        
-    df['drawdown_pct'] = ((df['last_price'] - df['high_24h']) / df['high_24h']) * 100
+    if not df.empty:
+        df['drawdown_pct'] = ((df['last_price'] - df['high_24h']) / df['high_24h']) * 100
     return df, exchange
 
-st.title("🔥 거래량 오더블록 & 리스크/레버리지 계산기")
-st.caption("실시간 오더블록 포착 및 포지션별 손익비(R:R)·적정 레버리지 산출")
+@st.cache_data(ttl=60)
+def fetch_ohlcv_data(_exchange, symbol, timeframe='1d', limit=150):
+    try:
+        ohlcv = _exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if not ohlcv or len(ohlcv) < 60:
+            return None
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df
+    except Exception:
+        return None
+
+# ==========================================
+# 2. 기술적 지표 및 패턴 감지 엔진
+# ==========================================
+def calculate_indicators(df, sma_short_p=20, sma_long_p=60, rsi_p=14):
+    df_calc = df.copy()
+    df_calc[f'SMA_{sma_short_p}'] = df_calc['Close'].rolling(window=sma_short_p).mean()
+    df_calc[f'SMA_{sma_long_p}'] = df_calc['Close'].rolling(window=sma_long_p).mean()
+    
+    delta = df_calc['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_p, adjust=False, min_periods=rsi_p).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_p, adjust=False, min_periods=rsi_p).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df_calc['RSI'] = 100 - (100 / (1 + rs))
+    return df_calc
+
+def detect_signals(df, tolerance_pct=0.02, pole_gain_pct=0.06):
+    signals = []
+    lows, highs, closes, volumes = df['Low'].values, df['High'].values, df['Close'].values, df['Volume'].values
+    
+    prominence = np.mean(lows) * 0.015
+    peaks_idx, _ = find_peaks(-lows, distance=5, prominence=prominence)
+    
+    # Double Bottom
+    for i in range(len(peaks_idx) - 1):
+        idx1, idx2 = peaks_idx[i], peaks_idx[i+1]
+        trough1, trough2 = lows[idx1], lows[idx2]
+        if 5 <= (idx2 - idx1) <= 35:
+            if abs(trough1 - trough2) / min(trough1, trough2) <= tolerance_pct:
+                neckline = highs[idx1:idx2+1].max()
+                post_df = df.iloc[idx2:]
+                breakout = post_df[post_df['Close'] > neckline]
+                if not breakout.empty:
+                    b_idx = df.index.get_loc(breakout.index[0])
+                    signals.append({'breakout_idx': b_idx, 'pattern_type': 'Double Bottom'})
+
+    # Bull Flag
+    pole_win = 5
+    for i in range(pole_win, len(df) - 15):
+        pole_start, pole_end = i - pole_win, i
+        gain = (closes[pole_end] - lows[pole_start]) / lows[pole_start]
+        if gain >= pole_gain_pct:
+            flag_df = df.iloc[pole_end+1 : pole_end+12]
+            if not flag_df.empty:
+                if flag_df['Volume'].mean() < volumes[pole_start:pole_end].mean() * 1.1:
+                    flag_high = flag_df['High'].max()
+                    breakout = flag_df[flag_df['Close'] > flag_high * 0.99]
+                    if not breakout.empty:
+                        b_idx = df.index.get_loc(breakout.index[0])
+                        signals.append({'breakout_idx': b_idx, 'pattern_type': 'Bull Flag'})
+                        
+    seen = set()
+    unique_signals = []
+    for s in sorted(signals, key=lambda x: x['breakout_idx']):
+        if s['breakout_idx'] not in seen:
+            seen.add(s['breakout_idx'])
+            unique_signals.append(s)
+            
+    return unique_signals
+
+# ==========================================
+# 3. 백테스트 시뮬레이션 엔진
+# ==========================================
+def run_backtest_engine(df, signals, tp_ratio=0.05, sl_ratio=0.03, max_holding_bars=15, position_pct=0.20, max_positions=4, initial_capital=10000.0):
+    cash = initial_capital
+    active_positions = []
+    closed_trades = []
+    equity_curve = []
+    
+    signal_map = {s['breakout_idx']: s['pattern_type'] for s in signals}
+    
+    for i in range(len(df)):
+        c_date = df.index[i]
+        c_close, c_high, c_low = df['Close'].iloc[i], df['High'].iloc[i], df['Low'].iloc[i]
+        
+        remaining = []
+        for pos in active_positions:
+            entry_p = pos['entry_price']
+            holding = i - pos['entry_idx']
+            tp_p, sl_p = entry_p * (1 + tp_ratio), entry_p * (1 - sl_ratio)
+            
+            exit_reason, exit_p = None, c_close
+            if c_high >= tp_p:
+                exit_reason, exit_p = 'Take Profit', tp_p
+            elif c_low <= sl_p:
+                exit_reason, exit_p = 'Stop Loss', sl_p
+            elif holding >= max_holding_bars:
+                exit_reason, exit_p = 'Time Out', c_close
+                
+            if exit_reason:
+                cash += pos['shares'] * exit_p
+                profit = (exit_p - entry_p) * pos['shares']
+                pnl = ((exit_p - entry_p) / entry_p) * 100
+                closed_trades.append({
+                    'pattern': pos['pattern'],
+                    'entry_date': df.index[pos['entry_idx']],
+                    'entry_price': entry_p,
+                    'exit_date': c_date,
+                    'exit_price': exit_p,
+                    'return_pct': round(pnl, 2),
+                    'profit': round(profit, 2),
+                    'exit_reason': exit_reason
+                })
+            else:
+                remaining.append(pos)
+        active_positions = remaining
+        
+        if i in signal_map and len(active_positions) < max_positions and cash > 0:
+            unrealized = sum(p['shares'] * c_close for p in active_positions)
+            total_eq = cash + unrealized
+            alloc_cash = min(cash, total_eq * position_pct)
+            
+            if alloc_cash >= 10.0:
+                shares = alloc_cash / c_close
+                cash -= alloc_cash
+                active_positions.append({
+                    'pattern': signal_map[i],
+                    'entry_idx': i,
+                    'entry_price': c_close,
+                    'shares': shares
+                })
+                
+        unrealized = sum(p['shares'] * c_close for p in active_positions)
+        equity_curve.append({
+            'Date': c_date,
+            'Total_Equity': cash + unrealized,
+            'Active_Pos': len(active_positions)
+        })
+        
+    last_c = df['Close'].iloc[-1]
+    for pos in active_positions:
+        cash += pos['shares'] * last_c
+        profit = (last_c - pos['entry_price']) * pos['shares']
+        pnl = ((last_c - pos['entry_price']) / pos['entry_price']) * 100
+        closed_trades.append({
+            'pattern': pos['pattern'],
+            'entry_date': df.index[pos['entry_idx']],
+            'entry_price': pos['entry_price'],
+            'exit_date': df.index[-1],
+            'exit_price': last_c,
+            'return_pct': round(pnl, 2),
+            'profit': round(profit, 2),
+            'exit_reason': 'Unclosed'
+        })
+        
+    trades_df = pd.DataFrame(closed_trades)
+    equity_df = pd.DataFrame(equity_curve).set_index('Date')
+    
+    if not trades_df.empty:
+        win_t = trades_df[trades_df['return_pct'] > 0]
+        win_rate = (len(win_t) / len(trades_df)) * 100
+        final_eq = equity_df['Total_Equity'].iloc[-1]
+        tot_ret = ((final_eq - initial_capital) / initial_capital) * 100
+        peak = equity_df['Total_Equity'].cummax()
+        mdd = abs(((equity_df['Total_Equity'] - peak) / peak).min()) * 100
+        metrics = {
+            'total_trades': len(trades_df),
+            'win_rate': round(win_rate, 2),
+            'total_return': round(tot_ret, 2),
+            'mdd': round(mdd, 2),
+            'final_capital': round(final_eq, 2)
+        }
+    else:
+        metrics = {'total_trades': 0, 'win_rate': 0.0, 'total_return': 0.0, 'mdd': 0.0, 'final_capital': round(initial_capital, 2)}
+        
+    return trades_df, equity_df, metrics
+
+# ==========================================
+# 4. Grid Search 탐색 함수
+# ==========================================
+def perform_grid_search(df_raw, sma_range, tp_range, sl_range, rsi_period=14, max_bars=15):
+    results = []
+    total_iterations = len(sma_range) * len(tp_range) * len(sl_range)
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    count = 0
+    for sma_s in sma_range:
+        df_calc = calculate_indicators(df_raw, sma_s, sma_s * 3, rsi_period)
+        signals = detect_signals(df_calc)
+        
+        for tp in tp_range:
+            for sl in sl_range:
+                count += 1
+                _, _, metrics = run_backtest_engine(df_calc, signals, tp, sl, max_holding_bars=max_bars)
+                results.append({
+                    '단기 SMA': sma_s,
+                    '장기 SMA': sma_s * 3,
+                    '익절률 (TP %)': round(tp * 100, 1),
+                    '손절률 (SL %)': round(sl * 100, 1),
+                    '손익비 (R:R)': round(tp / sl, 2),
+                    '총 거래 수': metrics['total_trades'],
+                    '승률 (%)': metrics['win_rate'],
+                    '누적 수익률 (%)': metrics['total_return'],
+                    'MDD (%)': metrics['mdd'],
+                    '최종 자산 ($)': metrics['final_capital']
+                })
+                progress_bar.progress(count / total_iterations)
+                status_text.text(f"🔍 파라미터 Grid 탐색 진행 중... ({count}/{total_iterations})")
+                
+    progress_bar.empty()
+    status_text.empty()
+    res_df = pd.DataFrame(results)
+    return res_df.sort_values(by='누적 수익률 (%)', ascending=False).reset_index(drop=True)
+
+# ==========================================
+# 5. UI 및 대시보드 메인
+# ==========================================
+st.title("🔥 크립토 정밀 차트 패턴 & Grid Search 대시보드")
+st.caption("실시간 오더블록/매물대 분석 + 차트 패턴 자동 포착 + Grid Search 최적 파라미터 추출")
 
 df_all, exchange = load_market_data()
 
 if not df_all.empty and exchange is not None:
     top_30 = df_all.sort_values(by='change_pct', ascending=False).head(30).copy()
     
-    with st.spinner("거래량 기반 오더블록(Volume OB) 및 RSI 장기 지표 산출 중..."):
-        analysis_results = []
-        for sym in top_30['symbol']:
-            res = analyze_volume_ob_and_rsi(sym, exchange)
-            if res:
-                analysis_results.append(res)
-            else:
-                analysis_results.append({
-                    'rsi': 50.0, 'rsi_sma50': 50.0, 'rsi_sma200': 50.0,
-                    'rsi_gap': 0.0, 'cross_status': 'N/A', 'is_squeezed': 'N/A',
-                    'bull_ob': '없음', 'bear_ob': '없음',
-                    'bull_ob_low': 0.0, 'bull_ob_high': 0.0,
-                    'bear_ob_low': 0.0, 'bear_ob_high': 0.0,
-                    'ob_status': '일반'
-                })
+    # 사이드바 파라미터
+    st.sidebar.header("⚙️ 1. 차트 & 백테스트 설정")
+    selected_symbol = st.sidebar.selectbox("분석 대상 코인 선택", top_30['symbol'].tolist(), index=0)
+    sma_short = st.sidebar.slider("단기 SMA 주기", 5, 40, 20)
+    sma_long = st.sidebar.slider("장기 SMA 주기", 20, 150, 60)
+    rsi_period = st.sidebar.slider("RSI 계산 기간", 5, 30, 14)
+    
+    st.sidebar.header("🎯 2. 손익비 & 자금 관리")
+    tp_input = st.sidebar.slider("목표 익절률 (TP %)", 1.0, 15.0, 5.0, 0.5) / 100
+    sl_input = st.sidebar.slider("목표 손절률 (SL %)", 1.0, 10.0, 3.0, 0.5) / 100
+    max_bars = st.sidebar.slider("최대 보유 봉 수", 3, 40, 15)
+    
+    st.sidebar.header("🔍 3. Grid Search 범위 설정")
+    sma_grid_min, sma_grid_max = st.sidebar.slider("SMA 탐색 범위 (일)", 5, 30, (10, 25))
+    tp_grid_min, tp_grid_max = st.sidebar.slider("익절 (TP %) 범위", 2.0, 12.0, (3.0, 8.0))
+    sl_grid_min, sl_grid_max = st.sidebar.slider("손절 (SL %) 범위", 1.0, 6.0, (2.0, 4.0))
+    
+    run_grid_btn = st.sidebar.button("🚀 Grid Search 최적화 실행", type="primary")
+
+    df_symbol = fetch_ohlcv_data(exchange, selected_symbol)
+    
+    if df_symbol is not None and not df_symbol.empty:
+        df_calc = calculate_indicators(df_symbol, sma_short, sma_long, rsi_period)
+        signals = detect_signals(df_calc)
+        trades_df, equity_df, metrics = run_backtest_engine(df_calc, signals, tp_input, sl_input, max_bars)
         
-        df_analysis = pd.DataFrame(analysis_results)
-        top_30 = pd.concat([top_30.reset_index(drop=True), df_analysis], axis=1)
-
-    top_30_sorted = top_30.sort_values(by='drawdown_pct', ascending=True).reset_index(drop=True)
-
-    # 탭 순서 변경 및 "👑 메이저 AI 추천" 추가
-    tab_major, tab_signal, tab_ob, tab_calc, tab_all, tab_rsi = st.tabs([
-        "👑 메이저 AI 추천 (BTC/ETH/SOL 등)",
-        "🤖 전체 AI 추천 포지션",
-        "🧱 거래량 오더블록 (Volume OB)",
-        "🧮 레버리지 & 손익비(R:R) 계산기",
-        "🔥 Top 30 종합 리스트",
-        "🎯 RSI 수렴/크로스"
-    ])
-
-    # 추천 종목 추출 공통 함수
-    def get_trade_signals(df_input):
-        longs = []
-        shorts = []
-        for _, row in df_input.iterrows():
-            price = row['last_price']
-            is_bull_trend = row['cross_status'] in ["🚀 골든크로스", "🟢 강세 추세"]
-            is_bear_trend = row['cross_status'] in ["📉 데드크로스", "🔴 약세 추세"]
-            is_bull_ob = "매수 지지대" in row['ob_status']
-            is_bear_ob = "매도 저항대" in row['ob_status']
+        tab_chart, tab_grid, tab_major = st.tabs([
+            "📈 백테스트 시각화 & 차트",
+            "🔍 Grid Search 최적화 결과",
+            "👑 메이저 코인 시세 목록"
+        ])
+        
+        # TAB 1: 차트 시각화
+        with tab_chart:
+            st.subheader(f"📊 {selected_symbol} 기술적 분석 및 백테스트 성과")
             
-            if (is_bull_trend and not is_bear_ob) or is_bull_ob:
-                sl = row['bull_ob_low'] * 0.985 if row['bull_ob_low'] > 0 else price * 0.96
-                tp = price + (price - sl) * 1.8
-                longs.append({
-                    'symbol': row['symbol'], 'price': price, 'ob_status': row['ob_status'],
-                    'cross_status': row['cross_status'], 'rsi': row['rsi'],
-                    'bull_ob': row['bull_ob'], 'sl': sl, 'tp': tp, 'rr': 1.8
-                })
-            elif (is_bear_trend and not is_bull_ob) or is_bear_ob:
-                sl = row['bear_ob_high'] * 1.015 if row['bear_ob_high'] > 0 else price * 1.04
-                tp = price - (sl - price) * 1.8
-                shorts.append({
-                    'symbol': row['symbol'], 'price': price, 'ob_status': row['ob_status'],
-                    'cross_status': row['cross_status'], 'rsi': row['rsi'],
-                    'bear_ob': row['bear_ob'], 'sl': sl, 'tp': tp, 'rr': 1.8
-                })
-        return longs, shorts
-
-    # 👑 메이저 AI 추천 탭
-    with tab_major:
-        st.subheader("👑 비트코인 및 주요 메이저 코인 전용 추천")
-        st.caption("비트코인(BTC), 이더리움(ETH), 솔라나(SOL), 리플(XRP) 등 시장 주도 메이저 자산의 타점 분석 결과입니다.")
-        
-        major_df = top_30_sorted[top_30_sorted['base'].isin(TOP_MAJORS)].reset_index(drop=True)
-        
-        if not major_df.empty:
-            m_longs, m_shorts = get_trade_signals(major_df)
-            col_ml, col_ms = st.columns(2)
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("총 포착 신호 / 거래 수", f"{len(signals)}개 / {metrics['total_trades']}회")
+            k2.metric("승률", f"{metrics['win_rate']} %")
+            k3.metric("누적 수익률", f"{metrics['total_return']} %", delta=f"{metrics['total_return']:.1f}%")
+            k4.metric("MDD", f"{metrics['mdd']} %")
+            k5.metric("최종 자산", f"${metrics['final_capital']:,.2f}")
             
-            with col_ml:
-                st.markdown("### 🚀 메이저 LONG (매수)")
-                if m_longs:
-                    for item in m_longs:
-                        with st.expander(f"🟢 **{item['symbol']}** (현재가: ${item['price']:,.2f})", expanded=True):
-                            st.markdown(f"""
-                            * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
-                            * **RSI(14):** {item['rsi']:.1f}
-                            * **상승 오더블록:** {item['bull_ob']}
-                            * **추천 진입가:** ${item['price']:,.2f}
-                            * **목표가 (TP):** `${item['tp']:,.2f}`
-                            * **손절가 (SL):** `${item['sl']:,.2f}` (손익비 1 : {item['rr']:.1f})
-                            """)
-                else:
-                    st.info("현재 매수 조건에 부합하는 메이저 코인이 없습니다.")
-
-            with col_ms:
-                st.markdown("### 📉 메이저 SHORT (매도)")
-                if m_shorts:
-                    for item in m_shorts:
-                        with st.expander(f"🔴 **{item['symbol']}** (현재가: ${item['price']:,.2f})", expanded=True):
-                            st.markdown(f"""
-                            * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
-                            * **RSI(14):** {item['rsi']:.1f}
-                            * **하락 오더블록:** {item['bear_ob']}
-                            * **추천 진입가:** ${item['price']:,.2f}
-                            * **목표가 (TP):** `${item['tp']:,.2f}`
-                            * **손절가 (SL):** `${item['sl']:,.2f}` (손익비 1 : {item['rr']:.1f})
-                            """)
-                else:
-                    st.info("현재 매도 조건에 부합하는 메이저 코인이 없습니다.")
-        else:
-            st.info("현재 거래량 상위 30개 항목 내에 포함된 메이저 코인이 없습니다.")
-
-    # 🤖 전체 AI 추천 포지션 탭
-    with tab_signal:
-        st.subheader("💡 Top 30 거래량 OB + RSI 종합 추천 종목")
-        st.caption("거래량 오더블록과 RSI 방향성이 일치하는 전체 종목 추천입니다.")
-        
-        all_longs, all_shorts = get_trade_signals(top_30_sorted)
-        col_l, col_s = st.columns(2)
-        
-        with col_l:
-            st.markdown("### 🚀 LONG (매수) 추천 종목")
-            if all_longs:
-                for item in all_longs[:4]:
-                    with st.expander(f"🟢 **{item['symbol']}** (현재가: ${item['price']:,.4f})", expanded=True):
-                        st.markdown(f"""
-                        * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
-                        * **RSI(14):** {item['rsi']:.1f}
-                        * **상승 오더블록:** {item['bull_ob']}
-                        * **추천 진입가:** ${item['price']:,.4f}
-                        * **목표가 (TP):** `${item['tp']:,.4f}`
-                        * **손절가 (SL):** `${item['sl']:,.4f}` (손익비 1 : {item['rr']:.1f})
-                        """)
-            else:
-                st.info("현재 조건에 부합하는 LONG 종목이 없습니다.")
-
-        with col_s:
-            st.markdown("### 📉 SHORT (매도) 추천 종목")
-            if all_shorts:
-                for item in all_shorts[:4]:
-                    with st.expander(f"🔴 **{item['symbol']}** (현재가: ${item['price']:,.4f})", expanded=True):
-                        st.markdown(f"""
-                        * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
-                        * **RSI(14):** {item['rsi']:.1f}
-                        * **하락 오더블록:** {item['bear_ob']}
-                        * **추천 진입가:** ${item['price']:,.4f}
-                        * **목표가 (TP):** `${item['tp']:,.4f}`
-                        * **손절가 (SL):** `${item['sl']:,.4f}` (손익비 1 : {item['rr']:.1f})
-                        """)
-            else:
-                st.info("현재 조건에 부합하는 SHORT 종목이 없습니다.")
-
-    # 🧮 레버리지 & 손익비 계산기 탭
-    with tab_calc:
-        st.subheader("🧮 리스크 관리 및 적정 레버리지 계산기")
-        st.caption("손절 시 손실 금액을 시드의 일정 비율로 제한하는 적정 레버리지와 손익비를 산출합니다.")
-        
-        col_in1, col_in2 = st.columns([1, 1])
-        
-        with col_in1:
-            st.markdown("##### 1️⃣ 계좌 및 매매 조건 설정")
-            total_balance = st.number_input("총 시드 자산 ($)", value=10000.0, step=500.0)
-            max_risk_pct = st.slider("1회 매매 최대 감수 리스크 (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-            position_type = st.radio("포지션 방향", ["LONG (매수)", "SHORT (매도)"], horizontal=True)
+            # Plotly 통합 차트
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3],
+                                subplot_titles=(f"<b>{selected_symbol} 가격 & 이동평균선 & 포지션</b>", "<b>RSI (14)</b>"))
             
-        with col_in2:
-            st.markdown("##### 2️⃣ 가격 타점 입력 ($)")
-            entry_price = st.number_input("진입 가격 ($)", value=100.0, step=0.1)
+            fig.add_trace(go.Candlestick(x=df_calc.index, open=df_calc['Open'], high=df_calc['High'], low=df_calc['Low'], close=df_calc['Close'], name='OHLC'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc[f'SMA_{sma_short}'], mode='lines', name=f'{sma_short} SMA', line=dict(color='#FFD700')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc[f'SMA_{sma_long}'], mode='lines', name=f'{sma_long} SMA', line=dict(color='#00BFFF')), row=1, col=1)
             
-            default_sl = entry_price * 0.95 if "LONG" in position_type else entry_price * 1.05
-            default_tp = entry_price * 1.10 if "LONG" in position_type else entry_price * 0.90
+            if not trades_df.empty:
+                for _, tr in trades_df.iterrows():
+                    clr = '#00E676' if tr['return_pct'] > 0 else '#FF5252'
+                    fig.add_trace(go.Scatter(x=[tr['entry_date'], tr['exit_date']], y=[tr['entry_price'], tr['exit_price']], mode='lines', line=dict(color=clr, width=1.8, dash='dash'), showlegend=False), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=[tr['entry_date']], y=[tr['entry_price']], mode='markers', marker=dict(symbol='triangle-up', size=11, color='#00E676'), showlegend=False), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=[tr['exit_date']], y=[tr['exit_price']], mode='markers', marker=dict(symbol='triangle-down', size=11, color=clr), showlegend=False), row=1, col=1)
+                    
+            fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['RSI'], mode='lines', name='RSI', line=dict(color='#AB63FA')), row=2, col=1)
+            fig.add_hline(y=70, line_dash="dot", line_color="#FF5252", row=2, col=1)
+            fig.add_hline(y=30, line_dash="dot", line_color="#00E676", row=2, col=1)
             
-            stop_loss = st.number_input("손절 가격 (Stop Loss) ($)", value=default_sl, step=0.1)
-            take_profit = st.number_input("목표 가격 (Take Profit) ($)", value=default_tp, step=0.1)
+            fig.update_layout(template="plotly_dark", height=650, xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.subheader("📋 상세 트레이딩 내역 로그")
+            st.dataframe(trades_df, use_container_width=True)
 
-        st.markdown("---")
-        
-        if entry_price > 0 and stop_loss > 0 and take_profit > 0:
-            if "LONG" in position_type:
-                sl_distance_pct = (entry_price - stop_loss) / entry_price * 100
-                tp_distance_pct = (take_profit - entry_price) / entry_price * 100
-            else:
-                sl_distance_pct = (stop_loss - entry_price) / entry_price * 100
-                tp_distance_pct = (entry_price - take_profit) / entry_price * 100
+        # TAB 2: Grid Search
+        with tab_grid:
+            st.subheader("🔍 파라미터 자동 최적화 (Grid Search)")
+            st.caption("설정한 범위 내의 이동평균선 및 TP/SL 파라미터를 완전 시뮬레이션하여 최상위 수익률 조합을 추출합니다.")
+            
+            if 'grid_res_df' not in st.session_state:
+                st.session_state.grid_res_df = None
                 
-            if sl_distance_pct <= 0:
-                st.error("⚠️ 손절가가 진입가보다 올바르지 않은 위치에 있습니다.")
-            elif tp_distance_pct <= 0:
-                st.error("⚠️ 목표가가 진입가보다 올바르지 않은 위치에 있습니다.")
+            if run_grid_btn:
+                sma_range = list(range(sma_grid_min, sma_grid_max + 1, 5))
+                tp_range = [round(x/100, 3) for x in np.arange(tp_grid_min, tp_grid_max + 0.1, 1.5)]
+                sl_range = [round(x/100, 3) for x in np.arange(sl_grid_min, sl_grid_max + 0.1, 1.0)]
+                
+                with st.spinner("Grid Search 탐색을 진행하고 있습니다..."):
+                    st.session_state.grid_res_df = perform_grid_search(df_symbol, sma_range, tp_range, sl_range, rsi_period=rsi_period, max_bars=max_bars)
+                    st.success("Grid Search 최적화 탐색이 완료되었습니다!")
+                    
+            if st.session_state.grid_res_df is not None:
+                res_df = st.session_state.grid_res_df
+                best = res_df.iloc[0]
+                
+                st.markdown("##### 🏆 최적 파라미터 (Top 1 Combination)")
+                b1, b2, b3, b4 = st.columns(4)
+                b1.metric("최적 단기 SMA", f"{int(best['단기 SMA'])}일")
+                b2.metric("최적 익절 / 손절", f"{best['익절률 (TP %)']}% / {best['손절률 (SL %)']}%")
+                b3.metric("최고 수익률", f"{best['누적 수익률 (%)']}%")
+                b4.metric("승률 / MDD", f"{best['승률 (%)']}% / {best['MDD (%)']}%")
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("##### 🔥 TP vs SL 수익률 히트맵")
+                    pivot_hm = res_df.pivot_table(index='익절률 (TP %)', columns='손절률 (SL %)', values='누적 수익률 (%)', aggfunc='mean')
+                    fig_hm = px.imshow(pivot_hm, color_continuous_scale="Viridis", text_auto=True)
+                    fig_hm.update_layout(template="plotly_dark", height=380)
+                    st.plotly_chart(fig_hm, use_container_width=True)
+                with c2:
+                    st.markdown("##### 📊 SMA별 수익률 분포")
+                    fig_box = px.box(res_df, x='단기 SMA', y='누적 수익률 (%)', template="plotly_dark")
+                    fig_box.update_layout(height=380)
+                    st.plotly_chart(fig_box, use_container_width=True)
+                    
+                st.markdown("##### 📋 상위 10개 최적 조합 순위표")
+                st.dataframe(res_df.head(10), use_container_width=True)
             else:
-                rr_ratio = tp_distance_pct / sl_distance_pct
-                max_loss_amount = total_balance * (max_risk_pct / 100)
-                position_size_usd = max_loss_amount / (sl_distance_pct / 100)
-                rec_leverage = position_size_usd / total_balance
-                expected_profit_amount = position_size_usd * (tp_distance_pct / 100)
-                
-                st.markdown("##### 📊 리스크 분석 결과")
-                res1, res2, res3, res4 = st.columns(4)
-                
-                res1.metric("손익비 (R:R Ratio)", f"1 : {rr_ratio:.2f}", delta="손익비 양호" if rr_ratio >= 1.5 else "손익비 낮음")
-                res2.metric("권장 레버리지", f"{rec_leverage:.1f}x")
-                res3.metric("최대 예상 손실액", f"-${max_loss_amount:,.2f}", f"-{max_risk_pct:.1f}% 시드")
-                res4.metric("목표 예상 수익액", f"+${expected_profit_amount:,.2f}", f"+{(expected_profit_amount/total_balance)*100:.1f}% 시드")
+                st.info("사이드바에서 범위를 조절하신 후 **[🚀 Grid Search 최적화 실행]** 버튼을 눌러주세요.")
 
-                st.markdown("---")
-                st.info(f"""
-                💡 **매매 실행 가이드:**
-                * **추천 손익비:** 보통 **1 : 1.5 이상**일 때 진입하는 것이 통계적으로 유효합니다. (현재: **1 : {rr_ratio:.2f}**)
-                * **포지션 규모:** 총 **${position_size_usd:,.2f}** 상당의 코인 수량을 체결해야 합니다.
-                * **레버리지 활용법:** 시드 전체(${total_balance:,.0f})를 증거금으로 쓸 경우 **{rec_leverage:.1f}x 레버리지**를 적용하면 손절 시 딱 **${max_loss_amount:,.2f} ({max_risk_pct}%)**만 손실 처리됩니다.
-                """)
-
-    with tab_ob:
-        st.subheader("🧱 거래량 기반 유효 오더블록(Volume Order Block) 매수/매도 구간")
-        display_ob_df = pd.DataFrame({
-            '종목코드': top_30_sorted['symbol'],
-            '현재가': top_30_sorted['last_price'],
-            '상승 오더블록 (매수 지지대)': top_30_sorted['bull_ob'],
-            '하락 오더블록 (매도 저항대)': top_30_sorted['bear_ob'],
-            '오더블록 도달 상태': top_30_sorted['ob_status'],
-            '24h 상승률': top_30_sorted['change_pct'].map('{:+.2f}%'.format)
-        })
-        st.dataframe(
-            display_ob_df,
-            use_container_width=True,
-            height=500,
-            hide_index=True
-        )
-
-    with tab_all:
-        st.subheader("🔥 Top 30 종합 시세 및 분야별 분류")
-        display_df = pd.DataFrame({
-            '종목코드': top_30_sorted['symbol'],
-            '분야(섹터)': top_30_sorted['sector'],
-            'RSI(14)': top_30_sorted['rsi'].map('{:.1f}'.format),
-            '추세 상태': top_30_sorted['cross_status'],
-            '오더블록 상태': top_30_sorted['ob_status'],
-            '고점 대비 조정률': top_30_sorted['drawdown_pct'].map('{:.2f}%'.format)
-        })
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            height=500,
-            hide_index=True
-        )
-
-    with tab_rsi:
-        st.subheader("🎯 RSI 50-200 수렴 및 크로스 종목")
-        squeezed_df = top_30_sorted.sort_values(by='rsi_gap', ascending=True)
-        rsi_table = pd.DataFrame({
-            '종목코드': squeezed_df['symbol'],
-            '분야(섹터)': squeezed_df['sector'],
-            'RSI 50-200 이격도': squeezed_df['rsi_gap'].map('{:.2f}'.format),
-            '수렴 여부': squeezed_df['is_squeezed'],
-            '추세 상태': squeezed_df['cross_status'],
-            '상승 오더블록(지지대)': squeezed_df['bull_ob']
-        })
-        st.dataframe(rsi_table, use_container_width=True, hide_index=True)
-
-    time.sleep(30)
-    st.rerun()
-else:
-    st.warning("거래소 API 데이터를 불러올 수 없어 30초 후 자동으로 재시도합니다.")
+        # TAB 3: 메이저 코인
+        with tab_major:
+            st.subheader("👑 메이저 코인 종목 시세 모니터링")
+            major_df = top_30[top_30['base'].isin(TOP_MAJORS)]
+            st.dataframe(major_df[['symbol', 'sector', 'last_price', 'change_pct', 'drawdown_pct']], use_container_width=True, hide_index=True)
+    else:
+        st.error("해당 종목의 캔들스틱 데이터를 불러올 수 없습니다.")
+        
     time.sleep(30)
     st.rerun()
