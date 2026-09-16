@@ -151,7 +151,7 @@ def fetch_ohlcv_full(_exchange, symbol, timeframe='1d', limit=150):
 
 
 # ==========================================
-# 2-1. 기존 탭 1용 엄격한 패턴 탐지 엔진
+# 2-1. 롱 패턴 및 백테스트 엔진
 # ==========================================
 def detect_pattern_signals(df, sma_period, adx_min=20.0):
   df_calc = df.copy()
@@ -247,98 +247,42 @@ def backtest_atr_engine(
   }
 
 
-def analyze_single_symbol_full(exchange, symbol, train_ratio=0.7):
-  df = fetch_ohlcv_full(exchange, symbol)
-  if df.empty or len(df) < 60:
-    return None
-
-  split_idx = int(len(df) * train_ratio)
-  train_df = df.iloc[:split_idx].copy()
-  test_df = df.iloc[split_idx:].copy()
-
-  if len(train_df) < 40 or len(test_df) < 20:
-    return None
-
-  best_score = -999.0
-  best_params = None
-  best_is_metric = None
-
-  for sma_p in [10, 15, 20]:
-    for tp_m in [2.0, 3.0, 4.0]:
-      for sl_m in [1.0, 1.5, 2.0]:
-        res_is = backtest_atr_engine(train_df, sma_p, tp_m, sl_m)
-        if res_is and res_is['return_pct'] > 0 and res_is['win_rate'] >= 50.0:
-          score = res_is['sharpe_ratio'] * 0.6 + res_is['profit_factor'] * 0.4
-          if score > best_score:
-            best_score = score
-            best_params = (sma_p, tp_m, sl_m)
-            best_is_metric = res_is
-
-  if not best_params:
-    return None
-
-  opt_sma, opt_tp_m, opt_sl_m = best_params
-  res_oos = backtest_atr_engine(test_df, opt_sma, opt_tp_m, opt_sl_m)
-
-  if res_oos and res_oos['return_pct'] > 0 and res_oos['win_rate'] >= 50.0:
-    latest_close = df['Close'].iloc[-1]
-    latest_atr = df['ATR'].iloc[-1]
-    latest_adx = df['ADX'].iloc[-1]
-    poc_price = df['POC_Price'].iloc[-1]
-
-    calc_tp = latest_close + (opt_tp_m * latest_atr)
-    calc_sl = latest_close - (opt_sl_m * latest_atr)
-
-    return {
-        'symbol': symbol,
-        'current_price': latest_close,
-        'poc_price': round(poc_price, 4),
-        'adx': round(latest_adx, 1),
-        'opt_sma': opt_sma,
-        'opt_tp_m': opt_tp_m,
-        'opt_sl_m': opt_sl_m,
-        'is_return': best_is_metric['return_pct'],
-        'is_win': best_is_metric['win_rate'],
-        'oos_return': res_oos['return_pct'],
-        'oos_win': res_oos['win_rate'],
-        'sharpe_ratio': res_oos['sharpe_ratio'],
-        'profit_factor': res_oos['profit_factor'],
-        'tp_price': round(calc_tp, 4),
-        'sl_price': round(calc_sl, 4),
-        'tp_pct': round(((calc_tp - latest_close) / latest_close) * 100, 2),
-        'sl_pct': round(((latest_close - calc_sl) / latest_close) * 100, 2),
-    }
-  return None
-
-
 # ==========================================
-# 2-2. 탭 2, 3용 전면 고도화된 모멘텀·POC 지지 엔진
+# 2-2. 숏(Short) 패턴 및 백테스트 엔진 (신규 추가)
 # ==========================================
-def detect_momentum_signals(df, sma_period, adx_min=12.0):
+def detect_short_pattern_signals(df, sma_period, adx_min=20.0):
   df_calc = df.copy()
   df_calc['SMA'] = df_calc['Close'].rolling(window=sma_period).mean()
 
-  signals = []
+  highs = df_calc['High'].values
   closes = df_calc['Close'].values
   smas = df_calc['SMA'].values
   adx_vals = df_calc['ADX'].fillna(0).values
-  pocs = df_calc['POC_Price'].values
 
-  for i in range(20, len(df_calc)):
-    is_above_sma = closes[i] >= smas[i] and closes[i - 1] < smas[i - 1]
-    is_near_poc = abs(closes[i] - pocs[i]) / pocs[i] <= 0.05
-    has_trend = adx_vals[i] >= adx_min
+  prominence = np.mean(highs) * 0.015
+  peaks_idx, _ = find_peaks(highs, distance=5, prominence=prominence)
 
-    if (is_above_sma or is_near_poc) and has_trend:
-      signals.append(i)
+  signals = []
+  for i in range(len(peaks_idx) - 1):
+    idx1, idx2 = peaks_idx[i], peaks_idx[i + 1]
+    if 5 <= (idx2 - idx1) <= 35 and abs(
+        highs[idx1] - highs[idx2]
+    ) / min(highs[idx1], highs[idx2]) <= 0.02:
+      support_line = df_calc['Low'].values[idx1 : idx2 + 1].min()
+      post_df = df_calc.iloc[idx2:]
+      breakdown = post_df[post_df['Close'] < support_line]
+      if not breakdown.empty:
+        b_idx = df_calc.index.get_loc(breakdown.index[0])
+        if adx_vals[b_idx] >= adx_min and closes[b_idx] <= smas[b_idx]:
+          signals.append(b_idx)
 
   return sorted(list(set(signals)))
 
 
-def backtest_momentum_engine(
+def backtest_short_atr_engine(
     df, sma_period, tp_atr_mult, sl_atr_mult, max_holding=15
 ):
-  signals = detect_momentum_signals(df, sma_period)
+  signals = detect_short_pattern_signals(df, sma_period)
   if not signals:
     return None
 
@@ -352,8 +296,9 @@ def backtest_momentum_engine(
     if pd.isna(atr_val) or atr_val <= 0:
       continue
 
-    tp_price = entry_price + (tp_atr_mult * atr_val)
-    sl_price = entry_price - (sl_atr_mult * atr_val)
+    # 숏 포지션: TP는 아래로, SL은 위로
+    tp_price = entry_price - (tp_atr_mult * atr_val)
+    sl_price = entry_price + (sl_atr_mult * atr_val)
 
     post_df = df.iloc[b_idx + 1 : min(b_idx + 1 + max_holding, len(df))]
     exit_price = entry_price
@@ -362,16 +307,129 @@ def backtest_momentum_engine(
       high_p = post_df['High'].iloc[k]
       low_p = post_df['Low'].iloc[k]
 
-      if high_p >= tp_price:
+      if low_p <= tp_price:
         exit_price = tp_price
         break
-      elif low_p <= sl_price:
+      elif high_p >= sl_price:
         exit_price = sl_price
         break
       else:
         exit_price = post_df['Close'].iloc[k]
 
-    trades.append((exit_price - entry_price) / entry_price)
+    # 숏 수익률 계산: (진입가 - 청산가) / 진입가
+    trades.append((entry_price - exit_price) / entry_price)
+
+  if len(trades) < 2:
+    return None
+
+  trades_arr = np.array(trades)
+  tot_ret = np.sum(trades_arr) * 100
+  win_rate = (np.sum(trades_arr > 0) / len(trades_arr)) * 100
+
+  gains = trades_arr[trades_arr > 0]
+  losses = abs(trades_arr[trades_arr < 0])
+  profit_factor = (
+      np.sum(gains) / np.sum(losses) if np.sum(losses) > 0 else 99.0
+  )
+
+  std_dev = np.std(trades_arr)
+  sharpe_ratio = (
+      (np.mean(trades_arr) / std_dev) * np.sqrt(365) if std_dev > 0 else 0.0
+  )
+
+  return {
+      'return_pct': round(tot_ret, 1),
+      'win_rate': round(win_rate, 1),
+      'profit_factor': round(profit_factor, 2),
+      'sharpe_ratio': round(sharpe_ratio, 2),
+      'trades_count': len(trades),
+  }
+
+
+# ==========================================
+# 2-3. 모멘텀 & POC 숏/롱 공용 고도화 엔진
+# ==========================================
+def detect_momentum_signals(df, sma_period, adx_min=12.0, is_short=False):
+  df_calc = df.copy()
+  df_calc['SMA'] = df_calc['Close'].rolling(window=sma_period).mean()
+
+  signals = []
+  closes = df_calc['Close'].values
+  smas = df_calc['SMA'].values
+  adx_vals = df_calc['ADX'].fillna(0).values
+  pocs = df_calc['POC_Price'].values
+
+  for i in range(20, len(df_calc)):
+    if not is_short:
+      is_trigger = (
+          closes[i] >= smas[i] and closes[i - 1] < smas[i - 1]
+      ) or (abs(closes[i] - pocs[i]) / pocs[i] <= 0.05)
+    else:
+      is_trigger = (
+          closes[i] <= smas[i] and closes[i - 1] > smas[i - 1]
+      ) or (abs(closes[i] - pocs[i]) / pocs[i] <= 0.05)
+
+    has_trend = adx_vals[i] >= adx_min
+    if is_trigger and has_trend:
+      signals.append(i)
+
+  return sorted(list(set(signals)))
+
+
+def backtest_momentum_engine(
+    df, sma_period, tp_atr_mult, sl_atr_mult, max_holding=15, is_short=False
+):
+  signals = detect_momentum_signals(df, sma_period, is_short=is_short)
+  if not signals:
+    return None
+
+  trades = []
+  for b_idx in signals:
+    if b_idx >= len(df) - 1:
+      continue
+
+    entry_price = df['Close'].iloc[b_idx]
+    atr_val = df['ATR'].iloc[b_idx]
+    if pd.isna(atr_val) or atr_val <= 0:
+      continue
+
+    if not is_short:
+      tp_price = entry_price + (tp_atr_mult * atr_val)
+      sl_price = entry_price - (sl_atr_mult * atr_val)
+    else:
+      tp_price = entry_price - (tp_atr_mult * atr_val)
+      sl_price = entry_price + (sl_atr_mult * atr_val)
+
+    post_df = df.iloc[b_idx + 1 : min(b_idx + 1 + max_holding, len(df))]
+    exit_price = entry_price
+
+    for k in range(len(post_df)):
+      high_p = post_df['High'].iloc[k]
+      low_p = post_df['Low'].iloc[k]
+
+      if not is_short:
+        if high_p >= tp_price:
+          exit_price = tp_price
+          break
+        elif low_p <= sl_price:
+          exit_price = sl_price
+          break
+        else:
+          exit_price = post_df['Close'].iloc[k]
+      else:
+        if low_p <= tp_price:
+          exit_price = tp_price
+          break
+        elif high_p >= sl_price:
+          exit_price = sl_price
+          break
+        else:
+          exit_price = post_df['Close'].iloc[k]
+
+    if not is_short:
+      trades.append((exit_price - entry_price) / entry_price)
+    else:
+      trades.append((entry_price - exit_price) / entry_price)
 
   if len(trades) < 1:
     return None
@@ -400,7 +458,9 @@ def backtest_momentum_engine(
   }
 
 
-def analyze_single_symbol_momentum(exchange, symbol, train_ratio=0.7):
+def analyze_single_symbol_full(
+    exchange, symbol, train_ratio=0.7, is_short=False
+):
   df = fetch_ohlcv_full(exchange, symbol)
   if df.empty or len(df) < 60:
     return None
@@ -419,8 +479,12 @@ def analyze_single_symbol_momentum(exchange, symbol, train_ratio=0.7):
   for sma_p in [10, 15, 20]:
     for tp_m in [2.0, 3.0, 4.0]:
       for sl_m in [1.0, 1.5, 2.0]:
-        res_is = backtest_momentum_engine(train_df, sma_p, tp_m, sl_m)
-        if res_is and res_is['return_pct'] >= 0:
+        if not is_short:
+          res_is = backtest_atr_engine(train_df, sma_p, tp_m, sl_m)
+        else:
+          res_is = backtest_short_atr_engine(train_df, sma_p, tp_m, sl_m)
+
+        if res_is and res_is['return_pct'] > 0 and res_is['win_rate'] >= 50.0:
           score = res_is['sharpe_ratio'] * 0.6 + res_is['profit_factor'] * 0.4
           if score > best_score:
             best_score = score
@@ -431,16 +495,27 @@ def analyze_single_symbol_momentum(exchange, symbol, train_ratio=0.7):
     return None
 
   opt_sma, opt_tp_m, opt_sl_m = best_params
-  res_oos = backtest_momentum_engine(test_df, opt_sma, opt_tp_m, opt_sl_m)
+  if not is_short:
+    res_oos = backtest_atr_engine(test_df, opt_sma, opt_tp_m, opt_sl_m)
+  else:
+    res_oos = backtest_short_atr_engine(test_df, opt_sma, opt_tp_m, opt_sl_m)
 
-  if res_oos and res_oos['return_pct'] >= -2.0:
+  if res_oos and res_oos['return_pct'] > 0 and res_oos['win_rate'] >= 50.0:
     latest_close = df['Close'].iloc[-1]
     latest_atr = df['ATR'].iloc[-1]
     latest_adx = df['ADX'].iloc[-1]
     poc_price = df['POC_Price'].iloc[-1]
 
-    calc_tp = latest_close + (opt_tp_m * latest_atr)
-    calc_sl = latest_close - (opt_sl_m * latest_atr)
+    if not is_short:
+      calc_tp = latest_close + (opt_tp_m * latest_atr)
+      calc_sl = latest_close - (opt_sl_m * latest_atr)
+      tp_pct = ((calc_tp - latest_close) / latest_close) * 100
+      sl_pct = ((latest_close - calc_sl) / latest_close) * 100
+    else:
+      calc_tp = latest_close - (opt_tp_m * latest_atr)
+      calc_sl = latest_close + (opt_sl_m * latest_atr)
+      tp_pct = ((latest_close - calc_tp) / latest_close) * 100
+      sl_pct = ((calc_sl - latest_close) / latest_close) * 100
 
     return {
         'symbol': symbol,
@@ -453,13 +528,91 @@ def analyze_single_symbol_momentum(exchange, symbol, train_ratio=0.7):
         'is_return': best_is_metric['return_pct'],
         'is_win': best_is_metric['win_rate'],
         'oos_return': res_oos['return_pct'],
-        'oos_win': res_oos['win_rate'],  # 수정됨: win_rate를 정상 매핑
+        'oos_win': res_oos['win_rate'],
         'sharpe_ratio': res_oos['sharpe_ratio'],
         'profit_factor': res_oos['profit_factor'],
         'tp_price': round(calc_tp, 4),
         'sl_price': round(calc_sl, 4),
-        'tp_pct': round(((calc_tp - latest_close) / latest_close) * 100, 2),
-        'sl_pct': round(((latest_close - calc_sl) / latest_close) * 100, 2),
+        'tp_pct': round(tp_pct, 2),
+        'sl_pct': round(sl_pct, 2),
+    }
+  return None
+
+
+def analyze_single_symbol_momentum(
+    exchange, symbol, train_ratio=0.7, is_short=False
+):
+  df = fetch_ohlcv_full(exchange, symbol)
+  if df.empty or len(df) < 60:
+    return None
+
+  split_idx = int(len(df) * train_ratio)
+  train_df = df.iloc[:split_idx].copy()
+  test_df = df.iloc[split_idx:].copy()
+
+  if len(train_df) < 40 or len(test_df) < 20:
+    return None
+
+  best_score = -999.0
+  best_params = None
+  best_is_metric = None
+
+  for sma_p in [10, 15, 20]:
+    for tp_m in [2.0, 3.0, 4.0]:
+      for sl_m in [1.0, 1.5, 2.0]:
+        res_is = backtest_momentum_engine(
+            train_df, sma_p, tp_m, sl_m, is_short=is_short
+        )
+        if res_is and res_is['return_pct'] >= 0:
+          score = res_is['sharpe_ratio'] * 0.6 + res_is['profit_factor'] * 0.4
+          if score > best_score:
+            best_score = score
+            best_params = (sma_p, tp_m, sl_m)
+            best_is_metric = res_is
+
+  if not best_params:
+    return None
+
+  opt_sma, opt_tp_m, opt_sl_m = best_params
+  res_oos = backtest_momentum_engine(
+      test_df, opt_sma, opt_tp_m, opt_sl_m, is_short=is_short
+  )
+
+  if res_oos and res_oos['return_pct'] >= -2.0:
+    latest_close = df['Close'].iloc[-1]
+    latest_atr = df['ATR'].iloc[-1]
+    latest_adx = df['ADX'].iloc[-1]
+    poc_price = df['POC_Price'].iloc[-1]
+
+    if not is_short:
+      calc_tp = latest_close + (opt_tp_m * latest_atr)
+      calc_sl = latest_close - (opt_sl_m * latest_atr)
+      tp_pct = ((calc_tp - latest_close) / latest_close) * 100
+      sl_pct = ((latest_close - calc_sl) / latest_close) * 100
+    else:
+      calc_tp = latest_close - (opt_tp_m * latest_atr)
+      calc_sl = latest_close + (opt_sl_m * latest_atr)
+      tp_pct = ((latest_close - calc_tp) / latest_close) * 100
+      sl_pct = ((calc_sl - latest_close) / latest_close) * 100
+
+    return {
+        'symbol': symbol,
+        'current_price': latest_close,
+        'poc_price': round(poc_price, 4),
+        'adx': round(latest_adx, 1),
+        'opt_sma': opt_sma,
+        'opt_tp_m': opt_tp_m,
+        'opt_sl_m': opt_sl_m,
+        'is_return': best_is_metric['return_pct'],
+        'is_win': best_is_metric['win_rate'],
+        'oos_return': res_oos['return_pct'],
+        'oos_win': res_oos['win_rate'],
+        'sharpe_ratio': res_oos['sharpe_ratio'],
+        'profit_factor': res_oos['profit_factor'],
+        'tp_price': round(calc_tp, 4),
+        'sl_price': round(calc_sl, 4),
+        'tp_pct': round(tp_pct, 2),
+        'sl_pct': round(sl_pct, 2),
     }
 
   return None
@@ -468,7 +621,7 @@ def analyze_single_symbol_momentum(exchange, symbol, train_ratio=0.7):
 # ==========================================
 # 3. 멀티스레드 병렬 탐색기들
 # ==========================================
-def run_pipeline_parallel(exchange, target_symbols, is_momentum=False):
+def run_pipeline_parallel(exchange, target_symbols, is_momentum=False, is_short=False):
   results = []
   completed = 0
   total = len(target_symbols)
@@ -481,7 +634,7 @@ def run_pipeline_parallel(exchange, target_symbols, is_momentum=False):
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
     future_map = {
-        executor.submit(analyzer_func, exchange, sym): sym
+        executor.submit(analyzer_func, exchange, sym, 0.7, is_short): sym
         for sym in target_symbols
     }
     for future in concurrent.futures.as_completed(future_map):
@@ -502,8 +655,14 @@ def run_pipeline_parallel(exchange, target_symbols, is_momentum=False):
 # ==========================================
 st.title("🔥 크립토 AI 알고리즘 추천 대시보드")
 st.caption(
-    "메인 상단에서 원하는 분석 실행 버튼을 누른 후 탭을 확인하세요."
+    "메인 상단에서 포지션 방향을 선택하고 분석 실행 버튼을 누르세요."
 )
+
+# 상단 포지션 선택 라디오 버튼
+position_mode = st.radio(
+    "포지션 방향 선택", ["📈 롱 (Long)", "📉 숏 (Short)"], horizontal=True
+)
+is_short_mode = True if "숏" in position_mode else False
 
 df_all, exchange = load_market_data()
 
@@ -530,23 +689,35 @@ if not df_all.empty and exchange is not None:
   col_btn1, col_btn2, col_btn3 = st.columns(3)
 
   with col_btn1:
-    if st.button("🚀 1번 탭 분석 (엄격 패턴)", use_container_width=True):
-      with st.spinner("⚡ 엄격한 W자 패턴 및 WFO 검증 엔진 가동 중..."):
+    if st.button(
+        f"🚀 1번 탭 분석 ({'숏' if is_short_mode else '롱'} 패턴)",
+        use_container_width=True,
+    ):
+      with st.spinner(
+          f"⚡ {'숏(하락붕괴)' if is_short_mode else '롱(W자돌파)'} 패턴 및 WFO 검증 엔진 가동 중..."
+      ):
         st.session_state['res_tab1'] = run_pipeline_parallel(
-            exchange, all_symbols, is_momentum=False
+            exchange, all_symbols, is_momentum=False, is_short=is_short_mode
         )
       st.success("🎉 1번 탭 분석 완료!")
 
   with col_btn2:
     if st.button(
-        "🚀 2·3번 탭 고도화 통합 분석", use_container_width=True, type="primary"
+        f"🚀 2·3번 탭 고도화 통합 분석 ({'숏' if is_short_mode else '롱'})",
+        use_container_width=True,
+        type="primary",
     ):
-      with st.spinner("⚡ 메이저 & 전체 고도화 분석 엔진 일괄 가동 중..."):
+      with st.spinner(
+          f"⚡ 메이저 & 전체 {'숏' if is_short_mode else '롱'} 고도화 분석 엔진 일괄 가동 중..."
+      ):
         st.session_state['res_tab2'] = run_pipeline_parallel(
-            exchange, major_symbols, is_momentum=True
+            exchange,
+            major_symbols,
+            is_momentum=True,
+            is_short=is_short_mode,
         )
         st.session_state['res_tab3'] = run_pipeline_parallel(
-            exchange, all_symbols, is_momentum=True
+            exchange, all_symbols, is_momentum=True, is_short=is_short_mode
         )
       st.success("🎉 2·3번 탭 고도화 분석 완료!")
 
@@ -557,14 +728,16 @@ if not df_all.empty and exchange is not None:
   st.markdown('---')
 
   tab_full, tab_major, tab_all = st.tabs([
-      "🎯 통합 AI 추천 (엄격한 패턴 검증)",
+      "🎯 통합 AI 추천 (패턴 검증)",
       "👑 메이저 정밀분석 추천 (고도화 엔진)",
       "🤖 전체 코인 정밀분석 추천 (고도화 엔진)",
   ])
 
 
   def render_results_view(key_name, section_title):
-    st.subheader(section_title)
+    st.subheader(
+        f"{section_title} [{ '📉 숏 포지션' if is_short_mode else '📈 롱 포지션' }]"
+    )
     if key_name not in st.session_state or st.session_state[key_name] is None:
       st.info("상단의 **[분석 실행]** 버튼을 눌러 분석을 시작하세요.")
       return
@@ -574,7 +747,7 @@ if not df_all.empty and exchange is not None:
       st.success(f"🎉 총 {len(res_df)}개 추천 종목이 도출되었습니다.")
       for _, item in res_df.iterrows():
         with st.expander(
-            f"🟢 **{item['symbol']}** (현재가: ${item['current_price']:,.4f}) -"
+            f"🔴 **{item['symbol']}** (현재가: ${item['current_price']:,.4f}) -"
             f" 검증 수익률: +{item['oos_return']}% | Sharpe:"
             f" {item['sharpe_ratio']}",
             expanded=True,
@@ -590,15 +763,15 @@ if not df_all.empty and exchange is not None:
           with col2:
             st.markdown(f"""
                         * **Volume POC (핵심 매물대):** `${item['poc_price']:,.4f}`
-                        * **ATR 동적 목표가 (TP):** `${item['tp_price']:,.4f}` (+{item['tp_pct']}%, ATR {item['opt_tp_m']}배)
-                        * **ATR 동적 손절가 (SL):** `${item['sl_price']:,.4f}` (-{item['sl_pct']}%, ATR {item['opt_sl_m']}배)
+                        * **ATR 동적 목표가 (TP):** `${item['tp_price']:,.4f}` (-{item['tp_pct']}%, ATR {item['opt_tp_m']}배)
+                        * **ATR 동적 손절가 (SL):** `${item['sl_price']:,.4f}` (+{item['sl_pct']}%, ATR {item['opt_sl_m']}배)
                         """)
     else:
       st.warning("조건에 부합하는 종목을 찾지 못했습니다.")
 
 
   with tab_full:
-    render_results_view('res_tab1', "🎯 전체 대상 통합 AI 추천 (엄격한 W자 패턴)")
+    render_results_view('res_tab1', "🎯 전체 대상 통합 AI 추천 (패턴 검증)")
 
   with tab_major:
     render_results_view('res_tab2', "👑 메이저 정밀분석 추천 (고도화 모멘텀 엔진)")
