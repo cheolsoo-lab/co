@@ -7,7 +7,7 @@ import streamlit as st
 import ta
 
 st.set_page_config(
-    page_title="🔥 완전 통합 크립토 AI 추천 대시보드",
+    page_title="🔥 완전 통합 크립토 AI 알고리즘 추천 대시보드",
     layout="wide",
 )
 
@@ -157,7 +157,6 @@ def fetch_ohlcv_full(_exchange, symbol, timeframe='1d', limit=150):
 # 2. 완전 통합 백테스트 & WFO 엔진
 # ==========================================
 def detect_pattern_signals(df, sma_period, adx_min=20.0):
-  """SMA + ADX 추세 필터 결합 패턴 감지"""
   df_calc = df.copy()
   df_calc['SMA'] = df_calc['Close'].rolling(window=sma_period).mean()
 
@@ -180,7 +179,6 @@ def detect_pattern_signals(df, sma_period, adx_min=20.0):
       breakout = post_df[post_df['Close'] > neckline]
       if not breakout.empty:
         b_idx = df_calc.index.get_loc(breakout.index[0])
-        # ADX 추세 조건 및 SMA 위 상향 정렬 확인
         if adx_vals[b_idx] >= adx_min and closes[b_idx] >= smas[b_idx]:
           signals.append(b_idx)
 
@@ -190,7 +188,6 @@ def detect_pattern_signals(df, sma_period, adx_min=20.0):
 def backtest_atr_engine(
     df, sma_period, tp_atr_mult, sl_atr_mult, max_holding=15
 ):
-  """ATR 동적 손익절 및 Sharpe/Profit Factor 종합 산출 엔진"""
   signals = detect_pattern_signals(df, sma_period)
   if not signals:
     return None
@@ -254,12 +251,10 @@ def backtest_atr_engine(
 
 
 def analyze_single_symbol_full_pipeline(exchange, symbol, train_ratio=0.7):
-  """모든 기법 통합 파이프라인 (Grid Search ➔ WFO 검증 ➔ Sharpe/PF 랭킹)"""
   df = fetch_ohlcv_full(exchange, symbol)
   if df.empty or len(df) < 60:
     return None
 
-  # 데이터 구간 분할 (WFO전진 분석)
   split_idx = int(len(df) * train_ratio)
   train_df = df.iloc[:split_idx].copy()
   test_df = df.iloc[split_idx:].copy()
@@ -267,7 +262,6 @@ def analyze_single_symbol_full_pipeline(exchange, symbol, train_ratio=0.7):
   if len(train_df) < 40 or len(test_df) < 20:
     return None
 
-  # 1단계: In-Sample 학습 구간 Grid Search 탐색
   best_score = -999.0
   best_params = None
   best_is_metric = None
@@ -286,11 +280,9 @@ def analyze_single_symbol_full_pipeline(exchange, symbol, train_ratio=0.7):
   if not best_params:
     return None
 
-  # 2단계: Out-of-Sample WFO 2차 미래 검증
   opt_sma, opt_tp_m, opt_sl_m = best_params
   res_oos = backtest_atr_engine(test_df, opt_sma, opt_tp_m, opt_sl_m)
 
-  # 미래 검증 구간(OOS)에서도 플러스 수익률 및 승률 50% 이상 보장
   if res_oos and res_oos['return_pct'] > 0 and res_oos['win_rate'] >= 50.0:
     latest_close = df['Close'].iloc[-1]
     latest_atr = df['ATR'].iloc[-1]
@@ -370,9 +362,12 @@ st.caption(
     " 동적 손익절 ➔ Sharpe Ratio 지표가 모두 결합된 완전 통합 시스템입니다."
 )
 
-if st.sidebar.button("🔄 실시간 데이터 새로고침", type="primary"):
-  st.cache_data.clear()
-  st.rerun()
+# 1. 새로고침 버튼 메인 상단 이동
+col_top1, col_top2 = st.columns([8, 2])
+with col_top2:
+  if st.button("🔄 데이터 새로고침", type="primary", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
 
 df_all, exchange = load_market_data()
 
@@ -390,40 +385,38 @@ if not df_all.empty and exchange is not None:
   )
 
   tab_full, tab_major, tab_all = st.tabs([
-      "🎯 완전 통합 AI 추천 (WFO+POC+Sharpe)",
-      "👑 메이저 AI 추천 (XRP/ETH/BTC)",
-      "🤖 전체 AI 추천 포지션",
+      "🎯 통합 AI 추천 (WFO+POC+Sharpe)",
+      "👑 메이저 정밀분석 추천 (XRP/ETH/BTC)",
+      "🤖 전체 코인 정밀분석 추천",
   ])
 
-  # 1. 🎯 완전 통합 AI 추천 탭
-  with tab_full:
-    st.subheader(
-        "🛡️ Grid Search + WFO 미래 검증 + POC + Sharpe Ratio 종합 검증 추천"
+  # 공통 탐색 실행 트리거 함수
+  def render_recommendation_section(symbols_subset, section_title):
+    st.subheader(section_title)
+    run_btn = st.button(
+        f"🚀 {section_title} 탐색 실행",
+        key=f"btn_{section_title}",
+        type="primary",
     )
-    st.caption(
-        "모든 분석 기법이 순차적으로 적용되어 과적합이 완벽히 제거되고"
-        " 손익비/승률이 검증된 핵심 종목입니다."
-    )
 
-    run_full_btn = st.button("🚀 완전 통합 AI 분석 탐색 실행", type="primary")
+    key_name = f"res_{section_title}"
+    if key_name not in st.session_state:
+      st.session_state[key_name] = None
 
-    if 'full_rec_results' not in st.session_state:
-      st.session_state.full_rec_results = None
-
-    if run_full_btn:
-      symbols_list = target_df['symbol'].tolist()
-      with st.spinner("8-Worker 병렬 멀티스레드 통합 엔진 탐색 중..."):
-        res_df = run_full_pipeline_parallel(exchange, symbols_list)
-        st.session_state.full_rec_results = res_df
-
-    if st.session_state.full_rec_results is not None:
-      rec_df = st.session_state.full_rec_results
-      if not rec_df.empty:
-        st.success(
-            f"🎉 완전 통합 검증 성공! 총 {len(rec_df)}개 종목이 모든 정밀"
-            " 필터링을 통과했습니다."
+    if run_btn:
+      with st.spinner("8-Worker 병렬 멀티스레드 정밀 분석 엔진 가동 중..."):
+        st.session_state[key_name] = run_full_pipeline_parallel(
+            exchange, symbols_subset
         )
-        for _, item in rec_df.iterrows():
+
+    if st.session_state[key_name] is not None:
+      res_df = st.session_state[key_name]
+      if not res_df.empty:
+        st.success(
+            f"🎉 정밀 분석 성공! 총 {len(res_df)}개 종목이 모든 필터링을"
+            " 통과했습니다."
+        )
+        for _, item in res_df.iterrows():
           with st.expander(
               f"🟢 **{item['symbol']}** (현재가: ${item['current_price']:,.4f}) -"
               f" OOS 미래 수익률: +{item['oos_return']}% | Sharpe:"
@@ -446,84 +439,32 @@ if not df_all.empty and exchange is not None:
                             """)
       else:
         st.warning(
-            "현재 모든 통합 검증 조건(WFO 검증, Profit Factor >= 1.3, ADX >="
+            "현재 모든 정밀 분석 조건(WFO 검증, Profit Factor >= 1.3, ADX >="
             " 20)을 만족하는 종목이 없습니다."
         )
     else:
       st.info(
-          "상단의 **[🚀 완전 통합 AI 분석 탐색 실행]** 버튼을 눌러 정밀 추천"
-          " 분석을 시작하세요."
+          f"상단의 **[🚀 {section_title} 탐색 실행]** 버튼을 눌러 정밀 분석을"
+          " 시작하세요."
       )
 
-  # 2 & 3. 메이저 및 전체 추천 탭 (기본 호환 유지)
-  def get_simple_recommendations(df_in):
-    longs, shorts = [], []
-    for _, row in df_in.iterrows():
-      price = row['last_price']
-      change = row['change_pct']
-      if change > 1.0:
-        longs.append({
-            'symbol': row['symbol'],
-            'price': price,
-            'sl': price * 0.96,
-            'tp': price * 1.072,
-        })
-      elif change < -2.0:
-        shorts.append({
-            'symbol': row['symbol'],
-            'price': price,
-            'sl': price * 1.04,
-            'tp': price * 0.928,
-        })
-    return longs, shorts
-
-  with tab_major:
-    st.subheader("👑 리플(XRP), 이더리움(ETH), 비트코인(BTC) 메이저 추천")
-    major_df = target_df[target_df['base'].isin(TOP_MAJORS)].reset_index(
-        drop=True
+  # 1. 🎯 통합 AI 추천 탭 (전체 대상)
+  with tab_full:
+    render_recommendation_section(
+        target_df['symbol'].tolist(), "전체 대상 통합 AI 추천"
     )
-    m_longs, m_shorts = get_simple_recommendations(major_df)
-    c_ml, c_ms = st.columns(2)
-    with c_ml:
-      st.markdown("### 🚀 메이저 LONG 추천")
-      for item in m_longs:
-        with st.expander(
-            f"🟢 **{item['symbol']}** (${item['price']:,.4f})", expanded=True
-        ):
-          st.markdown(
-              f"* **목표가 (TP):** `${item['tp']:,.4f}` | **손절가 (SL):**"
-              f" `${item['sl']:,.4f}`"
-          )
-    with c_ms:
-      st.markdown("### 📉 메이저 SHORT 추천")
-      for item in m_shorts:
-        with st.expander(
-            f"🔴 **{item['symbol']}** (${item['price']:,.4f})", expanded=True
-        ):
-          st.markdown(
-              f"* **목표가 (TP):** `${item['tp']:,.4f}` | **손절가 (SL):**"
-              f" `${item['sl']:,.4f}`"
-          )
 
+  # 2. 👑 메이저 정밀분석 추천 탭 (XRP, ETH, BTC 등 메이저 전용)
+  with tab_major:
+    major_symbols = (
+        target_df[target_df['base'].isin(TOP_MAJORS)]['symbol'].tolist()
+    )
+    render_recommendation_section(
+        major_symbols, "메이저 코인 정밀분석 추천"
+    )
+
+  # 3. 🤖 전체 코인 정밀분석 추천 탭 (전체 대상 동일 정밀 분석 적용)
   with tab_all:
-    st.subheader("🤖 전체 알트코인 종합 추천")
-    a_longs, a_shorts = get_simple_recommendations(target_df)
-    c_al, c_as = st.columns(2)
-    with c_al:
-      st.markdown("### 🚀 LONG 추천")
-      for item in a_longs[:6]:
-        with st.expander(
-            f"🟢 **{item['symbol']}** (${item['price']:,.4f})", expanded=True
-        ):
-          st.markdown(
-              f"* **TP:** `${item['tp']:,.4f}` | **SL:** `${item['sl']:,.4f}`"
-          )
-    with c_as:
-      st.markdown("### 📉 SHORT 추천")
-      for item in a_shorts[:6]:
-        with st.expander(
-            f"🔴 **{item['symbol']}** (${item['price']:,.4f})", expanded=True
-        ):
-          st.markdown(
-              f"* **TP:** `${item['tp']:,.4f}` | **SL:** `${item['sl']:,.4f}`"
-          )
+    render_recommendation_section(
+        target_df['symbol'].tolist(), "전체 코인 정밀분석 추천"
+    )
