@@ -453,7 +453,7 @@ def analyze_single_symbol_momentum(exchange, symbol, train_ratio=0.7):
         'is_return': best_is_metric['return_pct'],
         'is_win': best_is_metric['win_rate'],
         'oos_return': res_oos['return_pct'],
-        'oos_win': res_oos['win_rate'],
+        'oos_win': res_oos['oos_win'],
         'sharpe_ratio': res_oos['sharpe_ratio'],
         'profit_factor': res_oos['profit_factor'],
         'tp_price': round(calc_tp, 4),
@@ -502,15 +502,8 @@ def run_pipeline_parallel(exchange, target_symbols, is_momentum=False):
 # ==========================================
 st.title("🔥 크립토 AI 알고리즘 추천 대시보드")
 st.caption(
-    "1번 탭(엄격한 패턴 분석)과 2·3번 탭(고도화 모멘텀 분석)의 실행 버튼을"
-    " 각각 독립 및 통합으로 분리하였습니다."
+    "메인 상단에서 원하는 분석 실행 버튼을 누른 후 탭을 확인하세요."
 )
-
-col_top1, col_top2 = st.columns([8, 2])
-with col_top2:
-  if st.button("🔄 데이터 새로고침", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
 
 df_all, exchange = load_market_data()
 
@@ -532,6 +525,35 @@ if not df_all.empty and exchange is not None:
       target_df[target_df['base'].isin(TOP_MAJORS)]['symbol'].tolist()
   )
 
+  # --- 메인 상단 제어 패널 ---
+  st.markdown('---')
+  col_btn1, col_btn2, col_btn3 = st.columns(3)
+
+  with col_btn1:
+    if st.button("🚀 1번 탭 분석 (엄격 패턴)", use_container_width=True):
+      with st.spinner("⚡ 엄격한 W자 패턴 및 WFO 검증 엔진 가동 중..."):
+        st.session_state['res_tab1'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=False
+        )
+      st.success("🎉 1번 탭 분석 완료!")
+
+  with col_btn2:
+    if st.button("🚀 2·3번 탭 고도화 통합 분석", use_container_width=True, type="primary"):
+      with st.spinner("⚡ 메이저 & 전체 고도화 분석 엔진 일괄 가동 중..."):
+        st.session_state['res_tab2'] = run_pipeline_parallel(
+            exchange, major_symbols, is_momentum=True
+        )
+        st.session_state['res_tab3'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=True
+        )
+      st.success("🎉 2·3번 탭 고도화 분석 완료!")
+
+  with col_btn3:
+    if st.button("🔄 데이터 새로고침", use_container_width=True):
+      st.cache_data.clear()
+      st.rerun()
+  st.markdown('---')
+
   tab_full, tab_major, tab_all = st.tabs([
       "🎯 통합 AI 추천 (엄격한 패턴 검증)",
       "👑 메이저 정밀분석 추천 (고도화 엔진)",
@@ -540,8 +562,9 @@ if not df_all.empty and exchange is not None:
 
 
   def render_results_view(key_name, section_title):
+    st.subheader(section_title)
     if key_name not in st.session_state or st.session_state[key_name] is None:
-      st.info("상단의 **[실행]** 버튼을 눌러 분석을 시작하세요.")
+      st.info("상단의 **[분석 실행]** 버튼을 눌러 분석을 시작하세요.")
       return
 
     res_df = st.session_state[key_name]
@@ -569,53 +592,14 @@ if not df_all.empty and exchange is not None:
                         * **ATR 동적 손절가 (SL):** `${item['sl_price']:,.4f}` (-{item['sl_pct']}%, ATR {item['opt_sl_m']}배)
                         """)
     else:
-      st.warning(
-          "조건에 부합하는 종목을 찾지 못했습니다. (엄격한 패턴 조건 미충족)"
-      )
+      st.warning("조건에 부합하는 종목을 찾지 못했습니다.")
 
 
-  # 1번 탭: 독립된 실행 버튼 배치
   with tab_full:
-    st.subheader("🎯 전체 대상 통합 AI 추천 (엄격한 W자 패턴)")
-    if st.button(
-        "🚀 1번 탭 단독 분석 실행 (엄격 패턴)",
-        key="btn_tab1",
-        type="primary",
-    ):
-      with st.spinner(
-          "⚡ 엄격한 W자 패턴 및 WFO 검증 엔진 가동 중... (시간이 다소 소요될"
-          " 수 있습니다)"
-      ):
-        st.session_state['res_tab1'] = run_pipeline_parallel(
-            exchange, all_symbols, is_momentum=False
-        )
-      st.success("🎉 1번 탭 분석이 완료되었습니다!")
-    render_results_view('res_tab1', "분석 결과")
+    render_results_view('res_tab1', "🎯 전체 대상 통합 AI 추천 (엄격한 W자 패턴)")
 
-  # 2번, 3번 탭 통합 실행 버튼 배치
   with tab_major:
-    st.subheader("👑 메이저 정밀분석 추천 (고도화 모멘텀 엔진)")
-    if st.button(
-        "🚀 2·3번 탭 고도화 엔진 통합 분석 실행",
-        key="btn_tabs_23",
-        type="primary",
-    ):
-      with st.spinner(
-          "⚡ 메이저 & 전체 고도화 모멘텀·POC 분석 엔진 일괄 가동 중..."
-      ):
-        st.session_state['res_tab2'] = run_pipeline_parallel(
-            exchange, major_symbols, is_momentum=True
-        )
-        st.session_state['res_tab3'] = run_pipeline_parallel(
-            exchange, all_symbols, is_momentum=True
-        )
-      st.success("🎉 메이저 및 전체 고도화 분석이 일괄 완료되었습니다!")
-    render_results_view('res_tab2', "분석 결과")
+    render_results_view('res_tab2', "👑 메이저 정밀분석 추천 (고도화 모멘텀 엔진)")
 
   with tab_all:
-    st.subheader("🤖 전체 코인 정밀분석 추천 (고도화 모멘텀 엔진)")
-    st.caption(
-        "💡 2번 탭의 **[🚀 2·3번 탭 고도화 엔진 통합 분석 실행]** 버튼을 누르면"
-        " 메이저와 전체 코인이 동시에 분석됩니다."
-    )
-    render_results_view('res_tab3', "분석 결과")
+    render_results_view('res_tab3', "🤖 전체 코인 정밀분석 추천 (고도화 모멘텀 엔진)")
