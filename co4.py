@@ -95,17 +95,36 @@ def load_market_data():
 
 @st.cache_data(ttl=60)
 def fetch_ohlcv_data(_exchange, symbol, timeframe='1d', limit=150):
-    try:
-        ohlcv = _exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if not ohlcv or len(ohlcv) < 60:
-            return None
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df
-    except Exception:
-        return None
+    exchanges_to_try = []
+    if _exchange is not None:
+        exchanges_to_try.append(_exchange)
+        
+    for ex_name, ex_class in [
+        ('MEXC', getattr(ccxt, 'mexc', None)),
+        ('Gate.io', getattr(ccxt, 'gate', None)),
+        ('Bybit', getattr(ccxt, 'bybit', None))
+    ]:
+        if ex_class is not None:
+            try:
+                ex_inst = ex_class({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+                if _exchange is None or ex_inst.id != _exchange.id:
+                    exchanges_to_try.append(ex_inst)
+            except Exception:
+                continue
+
+    for ex in exchanges_to_try:
+        try:
+            ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            if ohlcv and len(ohlcv) >= 30:
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                return df
+        except Exception:
+            continue
+
+    return pd.DataFrame()
 
 # ==========================================
 # 2. 기술적 지표 및 패턴 감지 엔진
@@ -445,7 +464,7 @@ if not df_all.empty and exchange is not None:
             major_df = top_30[top_30['base'].isin(TOP_MAJORS)]
             st.dataframe(major_df[['symbol', 'sector', 'last_price', 'change_pct', 'drawdown_pct']], use_container_width=True, hide_index=True)
     else:
-        st.error("해당 종목의 캔들스틱 데이터를 불러올 수 없습니다.")
+        st.error("해당 종목의 캔들스틱 데이터를 불러올 수 없습니다. 잠시 후 재시도하거나 다른 거래소 우회가 가동될 수 있도록 커밋해 주세요.")
         
     time.sleep(30)
     st.rerun()
