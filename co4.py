@@ -7,7 +7,7 @@ import streamlit as st
 import ta
 
 st.set_page_config(
-    page_title="🔥 크립토 AI 알고리즘 추천 대시보드",
+    page_title="🔥 추천 대시보드",
     layout="wide",
 )
 
@@ -653,7 +653,7 @@ def run_pipeline_parallel(
 # ==========================================
 # 4. Streamlit UI 메인 화면
 # ==========================================
-st.title("🔥 크립토 AI 알고리즘 추천 대시보드")
+st.title("🔥 추천 대시보드")
 st.caption(
     "1번(패턴 검증)과 2·3번(고도화 모멘텀 엔진) 분석 버튼을 분리하여 원하는"
     " 분석만 빠르게 실행합니다."
@@ -744,11 +744,12 @@ if not df_all.empty and exchange is not None:
         st.success(f"총 {len(res_long)}개 롱 후보 도출")
         for _, item in res_long.iterrows():
           with st.expander(
-              f"🟢 **{item['symbol']}** (${item['current_price']:,.4f}) | +"
-              f"{item['oos_return']}%",
+              f"🟢 **{item['symbol']}** | WFO: `+{item['oos_return']}%` | TP:"
+              f" `${item['tp_price']:,.4f}` | SL: `${item['sl_price']:,.4f}`",
               expanded=False,
           ):
             st.markdown(f"""
+                        * **현재가:** `${item['current_price']:,.4f}`
                         * **최적 SMA / ADX:** `{item['opt_sma']}일` / `{item['adx']}`
                         * **WFO 검증 수익률:** `+{item['oos_return']}%` (승률 {item['oos_win']}%)
                         * **샤프 / 팩터:** `{item['sharpe_ratio']}` / `{item['profit_factor']}`
@@ -767,11 +768,12 @@ if not df_all.empty and exchange is not None:
         st.error(f"총 {len(res_short)}개 숏 후보 도출")
         for _, item in res_short.iterrows():
           with st.expander(
-              f"🔴 **{item['symbol']}** (${item['current_price']:,.4f}) | +"
-              f"{item['oos_return']}%",
+              f"🔴 **{item['symbol']}** | WFO: `+{item['oos_return']}%` | TP:"
+              f" `${item['tp_price']:,.4f}` | SL: `${item['sl_price']:,.4f}`",
               expanded=False,
           ):
             st.markdown(f"""
+                        * **현재가:** `${item['current_price']:,.4f}`
                         * **최적 SMA / ADX:** `{item['opt_sma']}일` / `{item['adx']}`
                         * **WFO 검증 수익률:** `+{item['oos_return']}%` (승률 {item['oos_win']}%)
                         * **샤프 / 팩터:** `{item['sharpe_ratio']}` / `{item['profit_factor']}`
