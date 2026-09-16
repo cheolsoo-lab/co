@@ -6,7 +6,7 @@ import time
 
 st.set_page_config(page_title="거래량 오더블록 & 리스크/레버리지 계산기", layout="wide")
 
-TOP_MAJORS = {'BTC', 'ETH', 'SOL', 'XRP'}
+TOP_MAJORS = {'BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'AVAX', 'DOT', 'LINK', 'SUI', 'APT', 'BCH', 'MATIC', 'NEAR'}
 
 SECTORS = {
     'AI / Big Data': {'NEAR', 'TAO', 'RENDER', 'RNDR', 'FET', 'AGIX', 'OCEAN', 'GRT', 'VIRTUAL', 'AKT', 'THETA'},
@@ -115,7 +115,6 @@ def analyze_volume_ob_and_rsi(symbol, _exchange):
 
 @st.cache_data(ttl=30)
 def load_market_data():
-    # ccxt 명칭 수정: gateio -> gate
     exchanges_to_try = [
         ('MEXC', getattr(ccxt, 'mexc', None)),
         ('Gate.io', getattr(ccxt, 'gate', None)),
@@ -208,24 +207,22 @@ if not df_all.empty and exchange is not None:
 
     top_30_sorted = top_30.sort_values(by='drawdown_pct', ascending=True).reset_index(drop=True)
 
-    tab_signal, tab_ob, tab_calc, tab_all, tab_rsi = st.tabs([
-        "🤖 AI 추천 포지션 (LONG / SHORT)",
+    # 탭 순서 변경 및 "👑 메이저 AI 추천" 추가
+    tab_major, tab_signal, tab_ob, tab_calc, tab_all, tab_rsi = st.tabs([
+        "👑 메이저 AI 추천 (BTC/ETH/SOL 등)",
+        "🤖 전체 AI 추천 포지션",
         "🧱 거래량 오더블록 (Volume OB)",
         "🧮 레버리지 & 손익비(R:R) 계산기",
         "🔥 Top 30 종합 리스트",
         "🎯 RSI 수렴/크로스"
     ])
 
-    with tab_signal:
-        st.subheader("💡 Top 30 + Volume OB + RSI 기반 추천 종목")
-        st.caption("거래량 오더블록과 RSI 지표의 방향성이 일치(Confluence)하는 종목만 엄선하여 추천합니다.")
-        
-        long_candidates = []
-        short_candidates = []
-        
-        for _, row in top_30_sorted.iterrows():
+    # 추천 종목 추출 공통 함수
+    def get_trade_signals(df_input):
+        longs = []
+        shorts = []
+        for _, row in df_input.iterrows():
             price = row['last_price']
-            
             is_bull_trend = row['cross_status'] in ["🚀 골든크로스", "🟢 강세 추세"]
             is_bear_trend = row['cross_status'] in ["📉 데드크로스", "🔴 약세 추세"]
             is_bull_ob = "매수 지지대" in row['ob_status']
@@ -234,41 +231,78 @@ if not df_all.empty and exchange is not None:
             if (is_bull_trend and not is_bear_ob) or is_bull_ob:
                 sl = row['bull_ob_low'] * 0.985 if row['bull_ob_low'] > 0 else price * 0.96
                 tp = price + (price - sl) * 1.8
-                
-                long_candidates.append({
-                    'symbol': row['symbol'],
-                    'price': price,
-                    'ob_status': row['ob_status'],
-                    'cross_status': row['cross_status'],
-                    'rsi': row['rsi'],
-                    'bull_ob': row['bull_ob'],
-                    'sl': sl,
-                    'tp': tp,
-                    'rr': 1.8
+                longs.append({
+                    'symbol': row['symbol'], 'price': price, 'ob_status': row['ob_status'],
+                    'cross_status': row['cross_status'], 'rsi': row['rsi'],
+                    'bull_ob': row['bull_ob'], 'sl': sl, 'tp': tp, 'rr': 1.8
                 })
-                
             elif (is_bear_trend and not is_bull_ob) or is_bear_ob:
                 sl = row['bear_ob_high'] * 1.015 if row['bear_ob_high'] > 0 else price * 1.04
                 tp = price - (sl - price) * 1.8
-                
-                short_candidates.append({
-                    'symbol': row['symbol'],
-                    'price': price,
-                    'ob_status': row['ob_status'],
-                    'cross_status': row['cross_status'],
-                    'rsi': row['rsi'],
-                    'bear_ob': row['bear_ob'],
-                    'sl': sl,
-                    'tp': tp,
-                    'rr': 1.8
+                shorts.append({
+                    'symbol': row['symbol'], 'price': price, 'ob_status': row['ob_status'],
+                    'cross_status': row['cross_status'], 'rsi': row['rsi'],
+                    'bear_ob': row['bear_ob'], 'sl': sl, 'tp': tp, 'rr': 1.8
                 })
+        return longs, shorts
 
+    # 👑 메이저 AI 추천 탭
+    with tab_major:
+        st.subheader("👑 비트코인 및 주요 메이저 코인 전용 추천")
+        st.caption("비트코인(BTC), 이더리움(ETH), 솔라나(SOL), 리플(XRP) 등 시장 주도 메이저 자산의 타점 분석 결과입니다.")
+        
+        major_df = top_30_sorted[top_30_sorted['base'].isin(TOP_MAJORS)].reset_index(drop=True)
+        
+        if not major_df.empty:
+            m_longs, m_shorts = get_trade_signals(major_df)
+            col_ml, col_ms = st.columns(2)
+            
+            with col_ml:
+                st.markdown("### 🚀 메이저 LONG (매수)")
+                if m_longs:
+                    for item in m_longs:
+                        with st.expander(f"🟢 **{item['symbol']}** (현재가: ${item['price']:,.2f})", expanded=True):
+                            st.markdown(f"""
+                            * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
+                            * **RSI(14):** {item['rsi']:.1f}
+                            * **상승 오더블록:** {item['bull_ob']}
+                            * **추천 진입가:** ${item['price']:,.2f}
+                            * **목표가 (TP):** `${item['tp']:,.2f}`
+                            * **손절가 (SL):** `${item['sl']:,.2f}` (손익비 1 : {item['rr']:.1f})
+                            """)
+                else:
+                    st.info("현재 매수 조건에 부합하는 메이저 코인이 없습니다.")
+
+            with col_ms:
+                st.markdown("### 📉 메이저 SHORT (매도)")
+                if m_shorts:
+                    for item in m_shorts:
+                        with st.expander(f"🔴 **{item['symbol']}** (현재가: ${item['price']:,.2f})", expanded=True):
+                            st.markdown(f"""
+                            * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
+                            * **RSI(14):** {item['rsi']:.1f}
+                            * **하락 오더블록:** {item['bear_ob']}
+                            * **추천 진입가:** ${item['price']:,.2f}
+                            * **목표가 (TP):** `${item['tp']:,.2f}`
+                            * **손절가 (SL):** `${item['sl']:,.2f}` (손익비 1 : {item['rr']:.1f})
+                            """)
+                else:
+                    st.info("현재 매도 조건에 부합하는 메이저 코인이 없습니다.")
+        else:
+            st.info("현재 거래량 상위 30개 항목 내에 포함된 메이저 코인이 없습니다.")
+
+    # 🤖 전체 AI 추천 포지션 탭
+    with tab_signal:
+        st.subheader("💡 Top 30 거래량 OB + RSI 종합 추천 종목")
+        st.caption("거래량 오더블록과 RSI 방향성이 일치하는 전체 종목 추천입니다.")
+        
+        all_longs, all_shorts = get_trade_signals(top_30_sorted)
         col_l, col_s = st.columns(2)
         
         with col_l:
             st.markdown("### 🚀 LONG (매수) 추천 종목")
-            if long_candidates:
-                for item in long_candidates[:3]:
+            if all_longs:
+                for item in all_longs[:4]:
                     with st.expander(f"🟢 **{item['symbol']}** (현재가: ${item['price']:,.4f})", expanded=True):
                         st.markdown(f"""
                         * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
@@ -283,8 +317,8 @@ if not df_all.empty and exchange is not None:
 
         with col_s:
             st.markdown("### 📉 SHORT (매도) 추천 종목")
-            if short_candidates:
-                for item in short_candidates[:3]:
+            if all_shorts:
+                for item in all_shorts[:4]:
                     with st.expander(f"🔴 **{item['symbol']}** (현재가: ${item['price']:,.4f})", expanded=True):
                         st.markdown(f"""
                         * **기술적 근거:** {item['cross_status']} | {item['ob_status']}
@@ -297,6 +331,7 @@ if not df_all.empty and exchange is not None:
             else:
                 st.info("현재 조건에 부합하는 SHORT 종목이 없습니다.")
 
+    # 🧮 레버리지 & 손익비 계산기 탭
     with tab_calc:
         st.subheader("🧮 리스크 관리 및 적정 레버리지 계산기")
         st.caption("손절 시 손실 금액을 시드의 일정 비율로 제한하는 적정 레버리지와 손익비를 산출합니다.")
