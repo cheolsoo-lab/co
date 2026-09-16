@@ -655,7 +655,8 @@ def run_pipeline_parallel(
 # ==========================================
 st.title("🔥 크립토 AI 알고리즘 추천 대시보드")
 st.caption(
-    "분석 버튼 한 번으로 롱(Long)과 숏(Short) 포지션 후보를 동시에 발굴합니다."
+    "1번(패턴 검증)과 2·3번(고도화 모멘텀 엔진) 분석 버튼을 분리하여 원하는"
+    " 분석만 빠르게 실행합니다."
 )
 
 df_all, exchange = load_market_data()
@@ -678,46 +679,47 @@ if not df_all.empty and exchange is not None:
       target_df[target_df['base'].isin(TOP_MAJORS)]['symbol'].tolist()
   )
 
-  # --- 메인 상단 제어 패널 (통합 롱/숏 동시 분석 버튼) ---
-  st.markdown('---')
-  col_btn1, col_btn2 = st.columns(2)
+  # --- 메인 상단 제어 패널 (분리된 분석 버튼들) ---
+  st.markdown("---")
+  col_btn1, col_btn2, col_btn3 = st.columns(3)
 
   with col_btn1:
-    if st.button("🚀 통합 롱/숏 동시 분석 실행", use_container_width=True, type="primary"):
-      with st.spinner(
-          "⚡ 전체 코인 대상 롱(W돌파) 및 숏(하락붕괴) 동시 검증 엔진 가동"
-          " 중..."
-      ):
-        # 롱 분석 결과 저장
+    if st.button("🎯 1번 분석 실행 (패턴 검증)", use_container_width=True, type="primary"):
+      with st.spinner("⏳ [1번] 전체 대상 패턴 검증 엔진 가동 중 (다소 시간 소요)..."):
         st.session_state['long_tab1'] = run_pipeline_parallel(
             exchange, all_symbols, is_momentum=False, is_short=False
         )
-        st.session_state['long_tab2'] = run_pipeline_parallel(
-            exchange, major_symbols, is_momentum=True, is_short=False
-        )
-        st.session_state['long_tab3'] = run_pipeline_parallel(
-            exchange, all_symbols, is_momentum=True, is_short=False
-        )
-
-        # 숏 분석 결과 저장
         st.session_state['short_tab1'] = run_pipeline_parallel(
             exchange, all_symbols, is_momentum=False, is_short=True
+        )
+        st.session_state['analyzed_1'] = True
+      st.success("🎯 1번 분석이 완료되었습니다!")
+
+  with col_btn2:
+    if st.button("🚀 2·3번 통합 분석 실행 (모멘텀 엔진)", use_container_width=True, type="primary"):
+      with st.spinner("⚡ [2·3번] 메이저 및 전체 코인 모멘텀 엔진 가동 중..."):
+        # 2번 (메이저 정밀분석)
+        st.session_state['long_tab2'] = run_pipeline_parallel(
+            exchange, major_symbols, is_momentum=True, is_short=False
         )
         st.session_state['short_tab2'] = run_pipeline_parallel(
             exchange, major_symbols, is_momentum=True, is_short=True
         )
+        # 3번 (전체 코인 정밀분석)
+        st.session_state['long_tab3'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=True, is_short=False
+        )
         st.session_state['short_tab3'] = run_pipeline_parallel(
             exchange, all_symbols, is_momentum=True, is_short=True
         )
+        st.session_state['analyzed_23'] = True
+      st.success("🚀 2·3번 통합 분석이 완료되었습니다!")
 
-        st.session_state['analyzed'] = True
-      st.success("🎉 롱 & 숏 통합 분석이 완료되었습니다!")
-
-  with col_btn2:
+  with col_btn3:
     if st.button("🔄 데이터 새로고침", use_container_width=True):
       st.cache_data.clear()
       st.rerun()
-  st.markdown('---')
+  st.markdown("---")
 
   tab_full, tab_major, tab_all = st.tabs([
       "🎯 통합 AI 추천 (패턴 검증)",
@@ -726,13 +728,10 @@ if not df_all.empty and exchange is not None:
   ])
 
 
-  def render_dual_results(long_key, short_key, section_title):
+  def render_dual_results(long_key, short_key, section_title, is_checked):
     st.subheader(section_title)
-    if not st.session_state.get('analyzed', False):
-      st.info(
-          "상단의 **[🚀 통합 롱/숏 동시 분석 실행]** 버튼을 눌러 분석을"
-          " 시작하세요."
-      )
+    if not st.session_state.get(is_checked, False):
+      st.info("상단에서 해당하는 **분석 실행 버튼**을 눌러 데이터를 불러오세요.")
       return
 
     col_long, col_short = st.columns(2)
@@ -786,7 +785,10 @@ if not df_all.empty and exchange is not None:
 
   with tab_full:
     render_dual_results(
-        'long_tab1', 'short_tab1', "🎯 전체 대상 통합 AI 추천 (패턴 검증)"
+        'long_tab1',
+        'short_tab1',
+        "🎯 전체 대상 통합 AI 추천 (패턴 검증)",
+        'analyzed_1',
     )
 
   with tab_major:
@@ -794,6 +796,7 @@ if not df_all.empty and exchange is not None:
         'long_tab2',
         'short_tab2',
         "👑 메이저 정밀분석 추천 (고도화 모멘텀 엔진)",
+        'analyzed_23',
     )
 
   with tab_all:
@@ -801,4 +804,5 @@ if not df_all.empty and exchange is not None:
         'long_tab3',
         'short_tab3',
         "🤖 전체 코인 정밀분석 추천 (고도화 모멘텀 엔진)",
+        'analyzed_23',
     )
