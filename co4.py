@@ -37,7 +37,6 @@ def analyze_volume_ob_and_rsi(symbol, _exchange):
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # ta 라이브러리로 지표 계산 (Streamlit 호환성 확보)
         df['rsi'] = ta.momentum.rsi(df['close'], window=14)
         df['rsi_sma50'] = ta.trend.sma_indicator(df['rsi'], window=50)
         df['rsi_sma200'] = ta.trend.sma_indicator(df['rsi'], window=200)
@@ -116,23 +115,24 @@ def analyze_volume_ob_and_rsi(symbol, _exchange):
 
 @st.cache_data(ttl=30)
 def load_market_data():
-    # Cloud IP 차단을 회피하기 위한 거래소 교체 우회 목록 (MEXC -> Gate.io -> Bybit 순서)
+    # ccxt 명칭 수정: gateio -> gate
     exchanges_to_try = [
-        ('MEXC', ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})),
-        ('Gate.io', ccxt.gateio({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})),
-        ('Bybit', ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}))
+        ('MEXC', getattr(ccxt, 'mexc', None)),
+        ('Gate.io', getattr(ccxt, 'gate', None)),
+        ('Bybit', getattr(ccxt, 'bybit', None))
     ]
     
     tickers = None
     exchange = None
-    used_exchange_name = ""
 
-    for ex_name, ex_instance in exchanges_to_try:
+    for ex_name, ex_class in exchanges_to_try:
+        if ex_class is None:
+            continue
         try:
+            ex_instance = ex_class({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
             tickers = ex_instance.fetch_tickers()
             if tickers:
                 exchange = ex_instance
-                used_exchange_name = ex_name
                 break
         except Exception:
             continue
@@ -149,7 +149,7 @@ def load_market_data():
         
         base_asset = symbol.split('/')[0]
         quote_vol = data.get('quoteVolume', 0) or 0
-        if quote_vol < 1000000:  # 최소 거래대금 조건 기준
+        if quote_vol < 1000000:
             continue
             
         change_pct = data.get('percentage', 0) or 0
@@ -216,7 +216,6 @@ if not df_all.empty and exchange is not None:
         "🎯 RSI 수렴/크로스"
     ])
 
-    # 🤖 AI 추천 포지션 (LONG / SHORT 중복 추천 방지 적용)
     with tab_signal:
         st.subheader("💡 Top 30 + Volume OB + RSI 기반 추천 종목")
         st.caption("거래량 오더블록과 RSI 지표의 방향성이 일치(Confluence)하는 종목만 엄선하여 추천합니다.")
@@ -232,7 +231,6 @@ if not df_all.empty and exchange is not None:
             is_bull_ob = "매수 지지대" in row['ob_status']
             is_bear_ob = "매도 저항대" in row['ob_status']
             
-            # LONG 조건 (SHORT 조건과 중복 차단)
             if (is_bull_trend and not is_bear_ob) or is_bull_ob:
                 sl = row['bull_ob_low'] * 0.985 if row['bull_ob_low'] > 0 else price * 0.96
                 tp = price + (price - sl) * 1.8
@@ -249,7 +247,6 @@ if not df_all.empty and exchange is not None:
                     'rr': 1.8
                 })
                 
-            # SHORT 조건
             elif (is_bear_trend and not is_bull_ob) or is_bear_ob:
                 sl = row['bear_ob_high'] * 1.015 if row['bear_ob_high'] > 0 else price * 1.04
                 tp = price - (sl - price) * 1.8
@@ -300,7 +297,6 @@ if not df_all.empty and exchange is not None:
             else:
                 st.info("현재 조건에 부합하는 SHORT 종목이 없습니다.")
 
-    # 🧮 레버리지 & 손익비 계산기 탭
     with tab_calc:
         st.subheader("🧮 리스크 관리 및 적정 레버리지 계산기")
         st.caption("손절 시 손실 금액을 시드의 일정 비율로 제한하는 적정 레버리지와 손익비를 산출합니다.")
@@ -363,7 +359,6 @@ if not df_all.empty and exchange is not None:
     with tab_ob:
         st.subheader("🧱 거래량 기반 유효 오더블록(Volume Order Block) 매수/매도 구간")
         display_ob_df = pd.DataFrame({
-            '마크': top_30_sorted['logo_url'],
             '종목코드': top_30_sorted['symbol'],
             '현재가': top_30_sorted['last_price'],
             '상승 오더블록 (매수 지지대)': top_30_sorted['bull_ob'],
@@ -373,7 +368,6 @@ if not df_all.empty and exchange is not None:
         })
         st.dataframe(
             display_ob_df,
-            column_config={"마크": st.column_config.ImageColumn("마크", width="small")},
             use_container_width=True,
             height=500,
             hide_index=True
@@ -382,7 +376,6 @@ if not df_all.empty and exchange is not None:
     with tab_all:
         st.subheader("🔥 Top 30 종합 시세 및 분야별 분류")
         display_df = pd.DataFrame({
-            '마크': top_30_sorted['logo_url'],
             '종목코드': top_30_sorted['symbol'],
             '분야(섹터)': top_30_sorted['sector'],
             'RSI(14)': top_30_sorted['rsi'].map('{:.1f}'.format),
@@ -392,7 +385,6 @@ if not df_all.empty and exchange is not None:
         })
         st.dataframe(
             display_df,
-            column_config={"마크": st.column_config.ImageColumn("마크", width="small")},
             use_container_width=True,
             height=500,
             hide_index=True
