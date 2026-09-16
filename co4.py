@@ -248,7 +248,7 @@ def backtest_atr_engine(
 
 
 # ==========================================
-# 2-2. 숏(Short) 패턴 및 백테스트 엔진 (신규 추가)
+# 2-2. 숏(Short) 패턴 및 백테스트 엔진
 # ==========================================
 def detect_short_pattern_signals(df, sma_period, adx_min=20.0):
   df_calc = df.copy()
@@ -296,7 +296,6 @@ def backtest_short_atr_engine(
     if pd.isna(atr_val) or atr_val <= 0:
       continue
 
-    # 숏 포지션: TP는 아래로, SL은 위로
     tp_price = entry_price - (tp_atr_mult * atr_val)
     sl_price = entry_price + (sl_atr_mult * atr_val)
 
@@ -316,7 +315,6 @@ def backtest_short_atr_engine(
       else:
         exit_price = post_df['Close'].iloc[k]
 
-    # 숏 수익률 계산: (진입가 - 청산가) / 진입가
     trades.append((entry_price - exit_price) / entry_price)
 
   if len(trades) < 2:
@@ -621,7 +619,9 @@ def analyze_single_symbol_momentum(
 # ==========================================
 # 3. 멀티스레드 병렬 탐색기들
 # ==========================================
-def run_pipeline_parallel(exchange, target_symbols, is_momentum=False, is_short=False):
+def run_pipeline_parallel(
+    exchange, target_symbols, is_momentum=False, is_short=False
+):
   results = []
   completed = 0
   total = len(target_symbols)
@@ -655,14 +655,8 @@ def run_pipeline_parallel(exchange, target_symbols, is_momentum=False, is_short=
 # ==========================================
 st.title("🔥 크립토 AI 알고리즘 추천 대시보드")
 st.caption(
-    "메인 상단에서 포지션 방향을 선택하고 분석 실행 버튼을 누르세요."
+    "분석 버튼 한 번으로 롱(Long)과 숏(Short) 포지션 후보를 동시에 발굴합니다."
 )
-
-# 상단 포지션 선택 라디오 버튼
-position_mode = st.radio(
-    "포지션 방향 선택", ["📈 롱 (Long)", "📉 숏 (Short)"], horizontal=True
-)
-is_short_mode = True if "숏" in position_mode else False
 
 df_all, exchange = load_market_data()
 
@@ -684,44 +678,42 @@ if not df_all.empty and exchange is not None:
       target_df[target_df['base'].isin(TOP_MAJORS)]['symbol'].tolist()
   )
 
-  # --- 메인 상단 제어 패널 ---
+  # --- 메인 상단 제어 패널 (통합 롱/숏 동시 분석 버튼) ---
   st.markdown('---')
-  col_btn1, col_btn2, col_btn3 = st.columns(3)
+  col_btn1, col_btn2 = st.columns(2)
 
   with col_btn1:
-    if st.button(
-        f"🚀 1번 탭 분석 ({'숏' if is_short_mode else '롱'} 패턴)",
-        use_container_width=True,
-    ):
+    if st.button("🚀 통합 롱/숏 동시 분석 실행", use_container_width=True, type="primary"):
       with st.spinner(
-          f"⚡ {'숏(하락붕괴)' if is_short_mode else '롱(W자돌파)'} 패턴 및 WFO 검증 엔진 가동 중..."
+          "⚡ 전체 코인 대상 롱(W돌파) 및 숏(하락붕괴) 동시 검증 엔진 가동"
+          " 중..."
       ):
-        st.session_state['res_tab1'] = run_pipeline_parallel(
-            exchange, all_symbols, is_momentum=False, is_short=is_short_mode
+        # 롱 분석 결과 저장
+        st.session_state['long_tab1'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=False, is_short=False
         )
-      st.success("🎉 1번 탭 분석 완료!")
+        st.session_state['long_tab2'] = run_pipeline_parallel(
+            exchange, major_symbols, is_momentum=True, is_short=False
+        )
+        st.session_state['long_tab3'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=True, is_short=False
+        )
+
+        # 숏 분석 결과 저장
+        st.session_state['short_tab1'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=False, is_short=True
+        )
+        st.session_state['short_tab2'] = run_pipeline_parallel(
+            exchange, major_symbols, is_momentum=True, is_short=True
+        )
+        st.session_state['short_tab3'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=True, is_short=True
+        )
+
+        st.session_state['analyzed'] = True
+      st.success("🎉 롱 & 숏 통합 분석이 완료되었습니다!")
 
   with col_btn2:
-    if st.button(
-        f"🚀 2·3번 탭 고도화 통합 분석 ({'숏' if is_short_mode else '롱'})",
-        use_container_width=True,
-        type="primary",
-    ):
-      with st.spinner(
-          f"⚡ 메이저 & 전체 {'숏' if is_short_mode else '롱'} 고도화 분석 엔진 일괄 가동 중..."
-      ):
-        st.session_state['res_tab2'] = run_pipeline_parallel(
-            exchange,
-            major_symbols,
-            is_momentum=True,
-            is_short=is_short_mode,
-        )
-        st.session_state['res_tab3'] = run_pipeline_parallel(
-            exchange, all_symbols, is_momentum=True, is_short=is_short_mode
-        )
-      st.success("🎉 2·3번 탭 고도화 분석 완료!")
-
-  with col_btn3:
     if st.button("🔄 데이터 새로고침", use_container_width=True):
       st.cache_data.clear()
       st.rerun()
@@ -734,47 +726,79 @@ if not df_all.empty and exchange is not None:
   ])
 
 
-  def render_results_view(key_name, section_title):
-    st.subheader(
-        f"{section_title} [{ '📉 숏 포지션' if is_short_mode else '📈 롱 포지션' }]"
-    )
-    if key_name not in st.session_state or st.session_state[key_name] is None:
-      st.info("상단의 **[분석 실행]** 버튼을 눌러 분석을 시작하세요.")
+  def render_dual_results(long_key, short_key, section_title):
+    st.subheader(section_title)
+    if not st.session_state.get('analyzed', False):
+      st.info(
+          "상단의 **[🚀 통합 롱/숏 동시 분석 실행]** 버튼을 눌러 분석을"
+          " 시작하세요."
+      )
       return
 
-    res_df = st.session_state[key_name]
-    if not res_df.empty:
-      st.success(f"🎉 총 {len(res_df)}개 추천 종목이 도출되었습니다.")
-      for _, item in res_df.iterrows():
-        with st.expander(
-            f"🔴 **{item['symbol']}** (현재가: ${item['current_price']:,.4f}) -"
-            f" 검증 수익률: +{item['oos_return']}% | Sharpe:"
-            f" {item['sharpe_ratio']}",
-            expanded=True,
-        ):
-          col1, col2 = st.columns(2)
-          with col1:
+    col_long, col_short = st.columns(2)
+
+    # 롱 포지션 영역
+    with col_long:
+      st.markdown("### 📈 롱 (Long) 추천 종목")
+      res_long = st.session_state.get(long_key, pd.DataFrame())
+      if not res_long.empty:
+        st.success(f"총 {len(res_long)}개 롱 후보 도출")
+        for _, item in res_long.iterrows():
+          with st.expander(
+              f"🟢 **{item['symbol']}** (${item['current_price']:,.4f}) | +"
+              f"{item['oos_return']}%",
+              expanded=False,
+          ):
             st.markdown(f"""
-                        * **최적 이평선(SMA) / ADX:** `{item['opt_sma']}일` / `{item['adx']}`
-                        * **학습 구간(In-Sample):** `+{item['is_return']}%` (승률 {item['is_win']}%)
-                        * **WFO 검증(Out-of-Sample):** `+{item['oos_return']}%` (승률 {item['oos_win']}%)
-                        * **Sharpe / Profit Factor:** `{item['sharpe_ratio']}` / `{item['profit_factor']}`
+                        * **최적 SMA / ADX:** `{item['opt_sma']}일` / `{item['adx']}`
+                        * **WFO 검증 수익률:** `+{item['oos_return']}%` (승률 {item['oos_win']}%)
+                        * **샤프 / 팩터:** `{item['sharpe_ratio']}` / `{item['profit_factor']}`
+                        * **매물대 (POC):** `${item['poc_price']:,.4f}`
+                        * **목표가 (TP):** `${item['tp_price']:,.4f}` (+{item['tp_pct']}%)
+                        * **손절가 (SL):** `${item['sl_price']:,.4f}` (-{item['sl_pct']}%)
                         """)
-          with col2:
+      else:
+        st.warning("조건에 맞는 롱 종목이 없습니다.")
+
+    # 숏 포지션 영역
+    with col_short:
+      st.markdown("### 📉 숏 (Short) 추천 종목")
+      res_short = st.session_state.get(short_key, pd.DataFrame())
+      if not res_short.empty:
+        st.error(f"총 {len(res_short)}개 숏 후보 도출")
+        for _, item in res_short.iterrows():
+          with st.expander(
+              f"🔴 **{item['symbol']}** (${item['current_price']:,.4f}) | +"
+              f"{item['oos_return']}%",
+              expanded=False,
+          ):
             st.markdown(f"""
-                        * **Volume POC (핵심 매물대):** `${item['poc_price']:,.4f}`
-                        * **ATR 동적 목표가 (TP):** `${item['tp_price']:,.4f}` (-{item['tp_pct']}%, ATR {item['opt_tp_m']}배)
-                        * **ATR 동적 손절가 (SL):** `${item['sl_price']:,.4f}` (+{item['sl_pct']}%, ATR {item['opt_sl_m']}배)
+                        * **최적 SMA / ADX:** `{item['opt_sma']}일` / `{item['adx']}`
+                        * **WFO 검증 수익률:** `+{item['oos_return']}%` (승률 {item['oos_win']}%)
+                        * **샤프 / 팩터:** `{item['sharpe_ratio']}` / `{item['profit_factor']}`
+                        * **매물대 (POC):** `${item['poc_price']:,.4f}`
+                        * **목표가 (TP):** `${item['tp_price']:,.4f}` (-{item['tp_pct']}%)
+                        * **손절가 (SL):** `${item['sl_price']:,.4f}` (+{item['sl_pct']}%)
                         """)
-    else:
-      st.warning("조건에 부합하는 종목을 찾지 못했습니다.")
+      else:
+        st.warning("조건에 맞는 숏 종목이 없습니다.")
 
 
   with tab_full:
-    render_results_view('res_tab1', "🎯 전체 대상 통합 AI 추천 (패턴 검증)")
+    render_dual_results(
+        'long_tab1', 'short_tab1', "🎯 전체 대상 통합 AI 추천 (패턴 검증)"
+    )
 
   with tab_major:
-    render_results_view('res_tab2', "👑 메이저 정밀분석 추천 (고도화 모멘텀 엔진)")
+    render_dual_results(
+        'long_tab2',
+        'short_tab2',
+        "👑 메이저 정밀분석 추천 (고도화 모멘텀 엔진)",
+    )
 
   with tab_all:
-    render_results_view('res_tab3', "🤖 전체 코인 정밀분석 추천 (고도화 모멘텀 엔진)")
+    render_dual_results(
+        'long_tab3',
+        'short_tab3',
+        "🤖 전체 코인 정밀분석 추천 (고도화 모멘텀 엔진)",
+    )
