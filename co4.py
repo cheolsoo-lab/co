@@ -300,7 +300,7 @@ def analyze_single_symbol_full(exchange, symbol, train_ratio=0.7):
         'is_return': best_is_metric['return_pct'],
         'is_win': best_is_metric['win_rate'],
         'oos_return': res_oos['return_pct'],
-        'oos_win': res_oos['oos_win'],
+        'oos_win': res_oos['win_rate'],
         'sharpe_ratio': res_oos['sharpe_ratio'],
         'profit_factor': res_oos['profit_factor'],
         'tp_price': round(calc_tp, 4),
@@ -453,7 +453,7 @@ def analyze_single_symbol_momentum(exchange, symbol, train_ratio=0.7):
         'is_return': best_is_metric['return_pct'],
         'is_win': best_is_metric['win_rate'],
         'oos_return': res_oos['return_pct'],
-        'oos_win': res_oos['oos_win'],
+        'oos_win': res_oos['win_rate'],  # 수정됨: win_rate를 정상 매핑
         'sharpe_ratio': res_oos['sharpe_ratio'],
         'profit_factor': res_oos['profit_factor'],
         'tp_price': round(calc_tp, 4),
@@ -538,7 +538,9 @@ if not df_all.empty and exchange is not None:
       st.success("🎉 1번 탭 분석 완료!")
 
   with col_btn2:
-    if st.button("🚀 2·3번 탭 고도화 통합 분석", use_container_width=True, type="primary"):
+    if st.button(
+        "🚀 2·3번 탭 고도화 통합 분석", use_container_width=True, type="primary"
+    ):
       with st.spinner("⚡ 메이저 & 전체 고도화 분석 엔진 일괄 가동 중..."):
         st.session_state['res_tab2'] = run_pipeline_parallel(
             exchange, major_symbols, is_momentum=True
