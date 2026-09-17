@@ -30,7 +30,7 @@ TOP_MAJORS = {
 
 
 # ==========================================
-# 0. 거시 유동성 및 마켓 레짐 날씨 판넬 (방어형 API 로드)
+# 0. 거시 유동성 및 마켓 레짐 날씨 판넬 (정밀 매집/설거지 판정 포함)
 # ==========================================
 def fetch_advanced_macro_data():
   """바이비트, MEXC, 바이낸스 순으로 안전하게 거시 데이터를 로드하는 함수"""
@@ -63,7 +63,7 @@ def fetch_advanced_macro_data():
 
 def analyze_advanced_market_regime(btc_df, usdt_df):
   """
-  BTC 이평선 및 거래량 기반 '매집 vs 설거지' 정밀 판정
+  BTC 이평선 및 거래량·가격 위치를 기반으로 '매집 vs 설거지'를 민감하게 판정
   """
   if btc_df is None or len(btc_df) < 50:
     return {
@@ -84,16 +84,20 @@ def analyze_advanced_market_regime(btc_df, usdt_df):
   recent_vol = btc_df['volume'].iloc[-5:].mean()
   avg_vol = btc_df['volume'].iloc[-30:].mean()
   price_change = btc_df['close'].iloc[-1] - btc_df['close'].iloc[-5]
+  
+  # 최근 5개 캔들의 저가 방어력 체크 (밑꼬리 매수세 유입 여부)
+  recent_lows_held = current_price >= btc_df['low'].iloc[-5:].min()
 
-  if price_change >= 0 and recent_vol < avg_vol * 0.8:
-    btc_phase = '⚠️ 설거지 / 개미 꼬시기 국면 (Bull Trap)'
-    alt_phase = '⚠️ 알트 윗꼬리 설거지 위험'
-  elif price_change < 0 and recent_vol > avg_vol * 1.2:
-    btc_phase = '🟢 진짜 매집 / 지지 다지기 국면 (Accumulation)'
-    alt_phase = '🟢 알트 순환 매집(저가 흡수) 포착'
+  # 정밀 매집/설거지 판정 조건
+  if price_change >= 0 and recent_vol < avg_vol * 0.9:
+    btc_phase = "⚠️ 설거지 / 개미 꼬시기 국면 (Bull Trap)"
+    alt_phase = "⚠️ 알트 윗꼬리 설거지 위험"
+  elif recent_lows_held and recent_vol >= avg_vol * 0.95:
+    btc_phase = "🟢 진짜 매집 / 저가 방어 국면 (Accumulation)"
+    alt_phase = "🟢 알트 저점 매수세(순환매집) 포착"
   else:
-    btc_phase = '🔄 방향성 탐색 / 일반 횡보 국면'
-    alt_phase = '🔄 알트 중립적 박스권 횡보'
+    btc_phase = "🔄 물량 소화 및 매물대 다지기"
+    alt_phase = "🔄 알트 눈치보기 박스권"
 
   if current_price > sma20 and sma20 > sma50:
     btc_status = '🟢 BTC 진짜 상승 / 자금 유입 (SAFE)'
