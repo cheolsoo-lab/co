@@ -1,209 +1,928 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+import concurrent.futures
 import ccxt
-from datetime import datetime
+import numpy as np
+import pandas as pd
+from scipy.signal import find_peaks
+import streamlit as st
+import ta
 
-# --- 페이지 설정 ---
 st.set_page_config(
-    page_title="퀀트 크립토 트레이딩 대시보드 (Macro + WFO + POC)",
-    page_icon="📈",
-    layout="wide"
+    page_title="🔥 추천 대시보드",
+    layout="wide",
 )
 
+TOP_MAJORS = {
+    'BTC',
+    'ETH',
+    'SOL',
+    'XRP',
+    'BNB',
+    'ADA',
+    'AVAX',
+    'DOT',
+    'LINK',
+    'SUI',
+    'APT',
+    'BCH',
+    'NEAR',
+    'DOGE',
+}
+
+
 # ==========================================
-# 1. 거시 유동성 및 마켓 레짐 분석 모듈 (상단 패널)
+# 0. 거시 유동성 및 마켓 레짐 날씨 판넬 (상단 추가 모듈)
 # ==========================================
 def fetch_advanced_macro_data():
-    """CCXT를 통해 BTC 및 USDT.D 등 거시 시장 데이터를 로드하는 함수"""
-    try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        
-        # 1. BTC 일봉 데이터 (최소 60일)
-        btc_ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1d', limit=60)
-        btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        # 2. USDT 도미넌스(USDT.D) 데이터 시도 (거래소 심볼 예외 방어)
-        usdt_df = None
-        for symbol in ['USDT.D/USDT', 'USDT/USDT', 'BTCUSDT']: 
-            try:
-                usdt_ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
-                usdt_df = pd.DataFrame(usdt_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                break
-            except:
-                continue
-                
-        return btc_df, usdt_df
-    except Exception as e:
-        return None, None
+  """CCXT를 통해 BTC 및 USDT.D 등 거시 시장 데이터를 로드하는 함수"""
+  try:
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'}
+    })
+    
+    btc_ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1d', limit=60)
+    btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    
+    usdt_df = None
+    for symbol in ['USDT.D/USDT', 'USDT/USDT', 'BTCUSDT']: 
+      try:
+        usdt_ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
+        usdt_df = pd.DataFrame(usdt_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        break
+      except:
+        continue
+            
+    return btc_df, usdt_df
+  except Exception:
+    return None, None
 
 def analyze_advanced_market_regime(btc_df, usdt_df):
-    """
-    BTC 이평선, USDT.D 자금 흐름, 거래량 기반 '매집 vs 설거지' 정밀 판정
-    """
-    if btc_df is None or len(btc_df) < 50:
-        return {
-            "btc_status": "🟡 데이터 수집 대기/부족",
-            "status_color": "orange",
-            "btc_phase": "🔄 분석 불가",
-            "alt_phase": "🔄 분석 불가",
-            "strategy": "네트워크 연결 또는 API 상태를 확인하세요."
-        }
-
-    # BTC 기술적 지표 계산
-    btc_df['sma20'] = btc_df['close'].rolling(window=20).mean()
-    btc_df['sma50'] = btc_df['close'].rolling(window=50).mean()
-    
-    current_price = btc_df['close'].iloc[-1]
-    sma20 = btc_df['sma20'].iloc[-1]
-    sma50 = btc_df['sma50'].iloc[-1]
-    
-    # 거래량 기반 '매집 vs 설거지' 판정
-    recent_vol = btc_df['volume'].iloc[-5:].mean()
-    avg_vol = btc_df['volume'].iloc[-30:].mean()
-    price_change = btc_df['close'].iloc[-1] - btc_df['close'].iloc[-5]
-    
-    if price_change >= 0 and recent_vol < avg_vol * 0.8:
-        btc_phase = "⚠️ 설거지 / 개미 꼬시기 국면 (Bull Trap)"
-        alt_phase = "⚠️ 알트 윗꼬리 설거지 위험"
-    elif price_change < 0 and recent_vol > avg_vol * 1.2:
-        btc_phase = "🟢 진짜 매집 / 지지 다지기 국면 (Accumulation)"
-        alt_phase = "🟢 알트 순환 매집(저가 흡수) 포착"
-    else:
-        btc_phase = "🔄 방향성 탐색 / 일반 횡보 국면"
-        alt_phase = "🔄 알트 중립적 박스권 횡보"
-
-    # USDT.D (테더 도미넌스) 추세 반영
-    usdt_trend_safe = True
-    if usdt_df is not None and len(usdt_df) >= 10:
-        usdt_sma = usdt_df['close'].rolling(window=10).mean().iloc[-1]
-        usdt_current = usdt_df['close'].iloc[-1]
-        if usdt_current > usdt_sma:
-            usdt_trend_safe = False
-
-    # BTC 대장 종합 날씨 판정
-    if current_price > sma20 and sma20 > sma50 and usdt_trend_safe:
-        btc_status = "🟢 BTC 진짜 상승 / 자금 유입 (SAFE)"
-        status_color = "green"
-        strategy = "✅ 알트 롱 포지션 적극 실행 (풀 비중)"
-    elif current_price < sma50 or not usdt_trend_safe:
-        btc_status = "🔴 BTC 하락 / 현금 도피·탈출 (DANGER)"
-        status_color = "red"
-        strategy = "🛑 알트 롱 전면 중단 / 100% 현금(테더) 방어"
-    else:
-        btc_status = "🟡 BTC 횡보 / 변동성 주의 (CAUTION)"
-        status_color = "orange"
-        strategy = "⚠️ 비중 50% 축소 / 보수적 스캘핑 및 관망"
-        
+  """
+  BTC 이평선, USDT.D 자금 흐름, 거래량 기반 '매집 vs 설거지' 정밀 판정
+  """
+  if btc_df is None or len(btc_df) < 50:
     return {
-        "btc_status": btc_status,
-        "status_color": status_color,
-        "btc_phase": btc_phase,
-        "alt_phase": alt_phase,
-        "strategy": strategy
+        "btc_status": "🟡 데이터 수집 대기/부족",
+        "status_color": "orange",
+        "btc_phase": "🔄 분석 불가",
+        "alt_phase": "🔄 분석 불가",
+        "strategy": "네트워크 연결 또는 API 상태를 확인하세요."
     }
+
+  btc_df['sma20'] = btc_df['close'].rolling(window=20).mean()
+  btc_df['sma50'] = btc_df['close'].rolling(window=50).mean()
+  
+  current_price = btc_df['close'].iloc[-1]
+  sma20 = btc_df['sma20'].iloc[-1]
+  sma50 = btc_df['sma50'].iloc[-1]
+  
+  recent_vol = btc_df['volume'].iloc[-5:].mean()
+  avg_vol = btc_df['volume'].iloc[-30:].mean()
+  price_change = btc_df['close'].iloc[-1] - btc_df['close'].iloc[-5]
+  
+  if price_change >= 0 and recent_vol < avg_vol * 0.8:
+    btc_phase = "⚠️ 설거지 / 개미 꼬시기 국면 (Bull Trap)"
+    alt_phase = "⚠️ 알트 윗꼬리 설거지 위험"
+  elif price_change < 0 and recent_vol > avg_vol * 1.2:
+    btc_phase = "🟢 진짜 매집 / 지지 다지기 국면 (Accumulation)"
+    alt_phase = "🟢 알트 순환 매집(저가 흡수) 포착"
+  else:
+    btc_phase = "🔄 방향성 탐색 / 일반 횡보 국면"
+    alt_phase = "🔄 알트 중립적 박스권 횡보"
+
+  usdt_trend_safe = True
+  if usdt_df is not None and len(usdt_df) >= 10:
+    usdt_sma = usdt_df['close'].rolling(window=10).mean().iloc[-1]
+    usdt_current = usdt_df['close'].iloc[-1]
+    if usdt_current > usdt_sma:
+      usdt_trend_safe = False
+
+  if current_price > sma20 and sma20 > sma50 and usdt_trend_safe:
+    btc_status = "🟢 BTC 진짜 상승 / 자금 유입 (SAFE)"
+    status_color = "green"
+    strategy = "✅ 알트 롱 포지션 적극 실행 (풀 비중)"
+  elif current_price < sma50 or not usdt_trend_safe:
+    btc_status = "🔴 BTC 하락 / 현금 도피·탈출 (DANGER)"
+    status_color = "red"
+    strategy = "🛑 알트 롱 전면 중단 / 100% 현금(테더) 방어"
+  else:
+    btc_status = "🟡 BTC 횡보 / 변동성 주의 (CAUTION)"
+    status_color = "orange"
+    strategy = "⚠️ 비중 50% 축소 / 보수적 스캘핑 및 관망"
+    
+  return {
+      "btc_status": btc_status,
+      "status_color": status_color,
+      "btc_phase": btc_phase,
+      "alt_phase": alt_phase,
+      "strategy": strategy
+  }
 
 def render_advanced_macro_weather_panel():
-    """Streamlit 최상단에 마켓 날씨 판넬을 렌더링"""
-    st.markdown("## 🌤️ 실시간 거시 유동성 및 마켓 레짐 날씨 판넬")
-    
-    with st.spinner("비트코인 멀티 타임프레임, USDT.D 유동성 및 세력 수급 분석 중..."):
-        btc_df, usdt_df = fetch_advanced_macro_data()
-        result = analyze_advanced_market_regime(btc_df, usdt_df)
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("### 🦁 BTC 대장 날씨")
-        if result["status_color"] == "green":
-            st.success(result["btc_status"])
-        elif result["status_color"] == "red":
-            st.error(result["btc_status"])
+  st.markdown("### 🌤️ 실시간 거시 유동성 및 마켓 레짐 날씨 패널")
+  with st.spinner("비트코인 멀티 타임프레임, USDT.D 유동성 및 세력 수급 분석 중..."):
+    btc_df, usdt_df = fetch_advanced_macro_data()
+    result = analyze_advanced_market_regime(btc_df, usdt_df)
+  
+  col1, col2, col3 = st.columns(3)
+  with col1:
+    st.markdown("**🦁 BTC 대장 날씨**")
+    if result["status_color"] == "green":
+      st.success(result["btc_status"])
+    elif result["status_color"] == "red":
+      st.error(result["btc_status"])
+    else:
+      st.warning(result["btc_status"])
+        
+  with col2:
+    st.markdown("**🦅 세력 수급 성격**")
+    st.info(f"**BTC:** {result['btc_phase']}")
+    st.info(f"**ALT:** {result['alt_phase']}")
+        
+  with col3:
+    st.markdown("**🛡️ 최종 대응 전략**")
+    st.warning(f"**{result['strategy']}**")
+  st.markdown("---")
+  return result["status_color"]
+
+
+# ==========================================
+# 1. 시세 데이터 및 거래소 API 로드 (Fallback)[cite: 1]
+# ==========================================
+@st.cache_data(ttl=300)
+def load_market_data():
+  exchanges_to_try = [
+      ('MEXC', getattr(ccxt, 'mexc', None)),
+      ('Gate.io', getattr(ccxt, 'gate', None)),
+      ('Bybit', getattr(ccxt, 'bybit', None)),
+  ]
+
+  tickers, exchange = None, None
+  for ex_name, ex_class in exchanges_to_try:
+    if ex_class is None:
+      continue
+    try:
+      ex_instance = ex_class(
+          {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
+      )
+      tickers = ex_instance.fetch_tickers()
+      if tickers:
+        exchange = ex_instance
+        break
+    except Exception:
+      continue
+
+  if not tickers or not exchange:
+    st.error('모든 거래소 API 접근이 일시적으로 제한되었습니다.')
+    return pd.DataFrame(), None
+
+  market_data = []
+  for symbol, data in tickers.items():
+    if not symbol.endswith('/USDT'):
+      continue
+    base_asset = symbol.split('/')[0]
+    quote_vol = data.get('quoteVolume', 0) or 0
+    if base_asset not in TOP_MAJORS and quote_vol < 1000000:
+      continue
+
+    change_pct = data.get('percentage', 0) or 0
+    high_24h = data.get('high')
+    low_24h = data.get('low')
+    last_price = data.get('last')
+
+    if high_24h and low_24h and last_price and high_24h > 0 and low_24h > 0:
+      market_data.append({
+          'symbol': symbol,
+          'base': base_asset,
+          'change_pct': change_pct,
+          'high_24h': high_24h,
+          'low_24h': low_24h,
+          'last_price': last_price,
+      })
+
+  df = pd.DataFrame(market_data)
+  return df, exchange
+
+
+def fetch_ohlcv_full(_exchange, symbol, timeframe='1d', limit=150):
+  exchanges_to_try = []
+  if _exchange is not None:
+    exchanges_to_try.append(_exchange)
+
+  for ex_name, ex_class in [
+      ('MEXC', getattr(ccxt, 'mexc', None)),
+      ('Gate.io', getattr(ccxt, 'gate', None)),
+      ('Bybit', getattr(ccxt, 'bybit', None)),
+  ]:
+    if ex_class is not None:
+      try:
+        ex_inst = ex_class(
+            {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
+        )
+        if _exchange is None or ex_inst.id != _exchange.id:
+          exchanges_to_try.append(ex_inst)
+      except Exception:
+        continue
+
+  for ex in exchanges_to_try:
+    try:
+      ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+      if ohlcv and len(ohlcv) >= 60:
+        df = pd.DataFrame(
+            ohlcv,
+            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'],
+        )
+        df.rename(
+            columns={
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close',
+                'volume': 'Volume',
+            },
+            inplace=True,
+        )
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+
+        df['ATR'] = ta.volatility.average_true_range(
+            df['High'], df['Low'], df['Close'], window=14
+        )
+        adx_ind = ta.trend.ADXIndicator(
+            df['High'], df['Low'], df['Close'], window=14
+        )
+        df['ADX'] = adx_ind.adx()
+
+        recent_df = df.iloc[-60:]
+        price_bins = pd.cut(recent_df['Close'], bins=20)
+        poc_bin = recent_df.groupby(price_bins, observed=False)[
+            'Volume'
+        ].sum().idxmax()
+        df['POC_Price'] = (poc_bin.left + poc_bin.right) / 2
+
+        return df
+    except Exception:
+      continue
+
+  return pd.DataFrame()
+
+
+# ==========================================
+# 2-1. 롱 패턴 및 백테스트 엔진[cite: 1]
+# ==========================================
+def detect_pattern_signals(df, sma_period, adx_min=20.0):
+  df_calc = df.copy()
+  df_calc['SMA'] = df_calc['Close'].rolling(window=sma_period).mean()
+
+  lows = df_calc['Low'].values
+  closes = df_calc['Close'].values
+  smas = df_calc['SMA'].values
+  adx_vals = df_calc['ADX'].fillna(0).values
+
+  prominence = np.mean(lows) * 0.015
+  peaks_idx, _ = find_peaks(-lows, distance=5, prominence=prominence)
+
+  signals = []
+  for i in range(len(peaks_idx) - 1):
+    idx1, idx2 = peaks_idx[i], peaks_idx[i + 1]
+    if 5 <= (idx2 - idx1) <= 35 and abs(
+        lows[idx1] - lows[idx2]
+    ) / min(lows[idx1], lows[idx2]) <= 0.02:
+      neckline = df_calc['High'].values[idx1 : idx2 + 1].max()
+      post_df = df_calc.iloc[idx2:]
+      breakout = post_df[post_df['Close'] > neckline]
+      if not breakout.empty:
+        b_idx = df_calc.index.get_loc(breakout.index[0])
+        if adx_vals[b_idx] >= adx_min and closes[b_idx] >= smas[b_idx]:
+          signals.append(b_idx)
+
+  return sorted(list(set(signals)))
+
+
+def backtest_atr_engine(
+    df, sma_period, tp_atr_mult, sl_atr_mult, max_holding=15
+):
+  signals = detect_pattern_signals(df, sma_period)
+  if not signals:
+    return None
+
+  trades = []
+  for b_idx in signals:
+    if b_idx >= len(df) - 1:
+      continue
+
+    entry_price = df['Close'].iloc[b_idx]
+    atr_val = df['ATR'].iloc[b_idx]
+    if pd.isna(atr_val) or atr_val <= 0:
+      continue
+
+    tp_price = entry_price + (tp_atr_mult * atr_val)
+    sl_price = entry_price - (sl_atr_mult * atr_val)
+
+    post_df = df.iloc[b_idx + 1 : min(b_idx + 1 + max_holding, len(df))]
+    exit_price = entry_price
+
+    for k in range(len(post_df)):
+      high_p = post_df['High'].iloc[k]
+      low_p = post_df['Low'].iloc[k]
+
+      if high_p >= tp_price:
+        exit_price = tp_price
+        break
+      elif low_p <= sl_price:
+        exit_price = sl_price
+        break
+      else:
+        exit_price = post_df['Close'].iloc[k]
+
+    trades.append((exit_price - entry_price) / entry_price)
+
+  if len(trades) < 2:
+    return None
+
+  trades_arr = np.array(trades)
+  tot_ret = np.sum(trades_arr) * 100
+  win_rate = (np.sum(trades_arr > 0) / len(trades_arr)) * 100
+
+  gains = trades_arr[trades_arr > 0]
+  losses = abs(trades_arr[trades_arr < 0])
+  profit_factor = (
+      np.sum(gains) / np.sum(losses) if np.sum(losses) > 0 else 99.0
+  )
+
+  std_dev = np.std(trades_arr)
+  sharpe_ratio = (
+      (np.mean(trades_arr) / std_dev) * np.sqrt(365) if std_dev > 0 else 0.0
+  )
+
+  return {
+      'return_pct': round(tot_ret, 1),
+      'win_rate': round(win_rate, 1),
+      'profit_factor': round(profit_factor, 2),
+      'sharpe_ratio': round(sharpe_ratio, 2),
+      'trades_count': len(trades),
+  }
+
+
+# ==========================================
+# 2-2. 숏(Short) 패턴 및 백테스트 엔진[cite: 1]
+# ==========================================
+def detect_short_pattern_signals(df, sma_period, adx_min=20.0):
+  df_calc = df.copy()
+  df_calc['SMA'] = df_calc['Close'].rolling(window=sma_period).mean()
+
+  highs = df_calc['High'].values
+  closes = df_calc['Close'].values
+  smas = df_calc['SMA'].values
+  adx_vals = df_calc['ADX'].fillna(0).values
+
+  prominence = np.mean(highs) * 0.015
+  peaks_idx, _ = find_peaks(highs, distance=5, prominence=prominence)
+
+  signals = []
+  for i in range(len(peaks_idx) - 1):
+    idx1, idx2 = peaks_idx[i], peaks_idx[i + 1]
+    if 5 <= (idx2 - idx1) <= 35 and abs(
+        highs[idx1] - highs[idx2]
+    ) / min(highs[idx1], highs[idx2]) <= 0.02:
+      support_line = df_calc['Low'].values[idx1 : idx2 + 1].min()
+      post_df = df_calc.iloc[idx2:]
+      breakdown = post_df[post_df['Close'] < support_line]
+      if not breakdown.empty:
+        b_idx = df_calc.index.get_loc(breakdown.index[0])
+        if adx_vals[b_idx] >= adx_min and closes[b_idx] <= smas[b_idx]:
+          signals.append(b_idx)
+
+  return sorted(list(set(signals)))
+
+
+def backtest_short_atr_engine(
+    df, sma_period, tp_atr_mult, sl_atr_mult, max_holding=15
+):
+  signals = detect_short_pattern_signals(df, sma_period)
+  if not signals:
+    return None
+
+  trades = []
+  for b_idx in signals:
+    if b_idx >= len(df) - 1:
+      continue
+
+    entry_price = df['Close'].iloc[b_idx]
+    atr_val = df['ATR'].iloc[b_idx]
+    if pd.isna(atr_val) or atr_val <= 0:
+      continue
+
+    tp_price = entry_price - (tp_atr_mult * atr_val)
+    sl_price = entry_price + (sl_atr_mult * atr_val)
+
+    post_df = df.iloc[b_idx + 1 : min(b_idx + 1 + max_holding, len(df))]
+    exit_price = entry_price
+
+    for k in range(len(post_df)):
+      high_p = post_df['High'].iloc[k]
+      low_p = post_df['Low'].iloc[k]
+
+      if low_p <= tp_price:
+        exit_price = tp_price
+        break
+      elif high_p >= sl_price:
+        exit_price = sl_price
+        break
+      else:
+        exit_price = post_df['Close'].iloc[k]
+
+    trades.append((entry_price - exit_price) / entry_price)
+
+  if len(trades) < 2:
+    return None
+
+  trades_arr = np.array(trades)
+  tot_ret = np.sum(trades_arr) * 100
+  win_rate = (np.sum(trades_arr > 0) / len(trades_arr)) * 100
+
+  gains = trades_arr[trades_arr > 0]
+  losses = abs(trades_arr[trades_arr < 0])
+  profit_factor = (
+      np.sum(gains) / np.sum(losses) if np.sum(losses) > 0 else 99.0
+  )
+
+  std_dev = np.std(trades_arr)
+  sharpe_ratio = (
+      (np.mean(trades_arr) / std_dev) * np.sqrt(365) if std_dev > 0 else 0.0
+  )
+
+  return {
+      'return_pct': round(tot_ret, 1),
+      'win_rate': round(win_rate, 1),
+      'profit_factor': round(profit_factor, 2),
+      'sharpe_ratio': round(sharpe_ratio, 2),
+      'trades_count': len(trades),
+  }
+
+
+# ==========================================
+# 2-3. 모멘텀 & POC 숏/롱 공용 고도화 엔진[cite: 1]
+# ==========================================
+def detect_momentum_signals(df, sma_period, adx_min=12.0, is_short=False):
+  df_calc = df.copy()
+  df_calc['SMA'] = df_calc['Close'].rolling(window=sma_period).mean()
+
+  signals = []
+  closes = df_calc['Close'].values
+  smas = df_calc['SMA'].values
+  adx_vals = df_calc['ADX'].fillna(0).values
+  pocs = df_calc['POC_Price'].values
+
+  for i in range(20, len(df_calc)):
+    if not is_short:
+      is_trigger = (
+          closes[i] >= smas[i] and closes[i - 1] < smas[i - 1]
+      ) or (abs(closes[i] - pocs[i]) / pocs[i] <= 0.05)
+    else:
+      is_trigger = (
+          closes[i] <= smas[i] and closes[i - 1] > smas[i - 1]
+      ) or (abs(closes[i] - pocs[i]) / pocs[i] <= 0.05)
+
+    has_trend = adx_vals[i] >= adx_min
+    if is_trigger and has_trend:
+      signals.append(i)
+
+  return sorted(list(set(signals)))
+
+
+def backtest_momentum_engine(
+    df, sma_period, tp_atr_mult, sl_atr_mult, max_holding=15, is_short=False
+):
+  signals = detect_momentum_signals(df, sma_period, is_short=is_short)
+  if not signals:
+    return None
+
+  trades = []
+  for b_idx in signals:
+    if b_idx >= len(df) - 1:
+      continue
+
+    entry_price = df['Close'].iloc[b_idx]
+    atr_val = df['ATR'].iloc[b_idx]
+    if pd.isna(atr_val) or atr_val <= 0:
+      continue
+
+    if not is_short:
+      tp_price = entry_price + (tp_atr_mult * atr_val)
+      sl_price = entry_price - (sl_atr_mult * atr_val)
+    else:
+      tp_price = entry_price - (tp_atr_mult * atr_val)
+      sl_price = entry_price + (sl_atr_mult * atr_val)
+
+    post_df = df.iloc[b_idx + 1 : min(b_idx + 1 + max_holding, len(df))]
+    exit_price = entry_price
+
+    for k in range(len(post_df)):
+      high_p = post_df['High'].iloc[k]
+      low_p = post_df['Low'].iloc[k]
+
+      if not is_short:
+        if high_p >= tp_price:
+          exit_price = tp_price
+          break
+        elif low_p <= sl_price:
+          exit_price = sl_price
+          break
         else:
-            st.warning(result["btc_status"])
-            
-    with col2:
-        st.markdown("### 🦅 세력 수급 성격")
-        st.info(f"**BTC:** {result['btc_phase']}")
-        st.info(f"**ALT:** {result['alt_phase']}")
-        
-    with col3:
-        st.markdown("### 🛡️ 최종 대응 전략")
-        st.warning(f"**{result['strategy']}**")
-        
-    st.markdown("---")
-    return result["status_color"] # 하단 엔진 제어용으로 색상 반환
+          exit_price = post_df['Close'].iloc[k]
+      else:
+        if low_p <= tp_price:
+          exit_price = tp_price
+          break
+        elif high_p >= sl_price:
+          exit_price = sl_price
+          break
+        else:
+          exit_price = post_df['Close'].iloc[k]
+
+    if not is_short:
+      trades.append((exit_price - entry_price) / entry_price)
+    else:
+      trades.append((entry_price - exit_price) / entry_price)
+
+  if len(trades) < 1:
+    return None
+
+  trades_arr = np.array(trades)
+  tot_ret = np.sum(trades_arr) * 100
+  win_rate = (np.sum(trades_arr > 0) / len(trades_arr)) * 100
+
+  gains = trades_arr[trades_arr > 0]
+  losses = abs(trades_arr[trades_arr < 0])
+  profit_factor = (
+      np.sum(gains) / np.sum(losses) if np.sum(losses) > 0 else 99.0
+  )
+
+  std_dev = np.std(trades_arr)
+  sharpe_ratio = (
+      (np.mean(trades_arr) / std_dev) * np.sqrt(365) if std_dev > 0 else 0.0
+  )
+
+  return {
+      'return_pct': round(tot_ret, 1),
+      'win_rate': round(win_rate, 1),
+      'profit_factor': round(profit_factor, 2),
+      'sharpe_ratio': round(sharpe_ratio, 2),
+      'trades_count': len(trades),
+  }
 
 
-# ==========================================
-# 2. 알트코인 추천 및 WFO + POC + ATR 엔진 (하단 본문)
-# ==========================================
-def render_altcoin_trading_engine(macro_status_color):
-    st.markdown("## 📊 알트코인 WFO 최적화 및 POC 오더플로우 추천 엔진")
-    
-    # 상단 날씨가 위험(red)일 때 경고 메시지 출력
-    if macro_status_color == "red":
-        st.error("🚨 [경고] 현재 거시 시장이 '하락/위험' 국면이므로 하단 추천 종목의 롱 매매를 권장하지 않습니다.")
-    
-    # 사이드바 설정
-    st.sidebar.header("⚙️ 트레이딩 설정")
-    selected_exchange = st.sidebar.selectbox("거래소 선택", ["Binance (Fallback 회전)", "MEXC", "Gate.io", "Bybit"])
-    leverage = st.sidebar.slider("레버리지 배율", 1, 20, 5)
-    risk_mode = st.sidebar.radio("리스크 관리 모드", ["안전형 (ATR 넓게)", "공격형 (타이트한 스캘핑)"])
-    
-    # 사용자 편의를 위한 수동 새로고침 버튼
-    if st.sidebar.button("🔄 시장 데이터 새로고침"):
-        st.rerun()
+def analyze_single_symbol_full(
+    exchange, symbol, train_ratio=0.7, is_short=False
+):
+  df = fetch_ohlcv_full(exchange, symbol)
+  if df.empty or len(df) < 60:
+    return None
 
-    st.markdown("### 🔍 실시간 알트코인 스캔 결과 (상위 랭킹)")
-    
-    # 예시용 시뮬레이션 알트코인 데이터 테이블 (실제 엔진 연동부)
-    mock_data = {
-        "종목": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"],
-        "현재가": [64200.0, 3450.0, 142.5, 0.58, 0.125],
-        "POC (매물대)": [63800.0, 3420.0, 140.0, 0.57, 0.120],
-        "WFO 점수": [94.5, 91.2, 88.7, 85.1, 82.0],
-        "추천 방향": ["LONG", "LONG", "LONG", "LONG", "NEUTRAL"],
-        "권장 손절가(SL)": [62500.0, 3350.0, 135.0, 0.55, 0.115],
-        "목표가(TP)": [67000.0, 3650.0, 152.0, 0.62, 0.138]
+  split_idx = int(len(df) * train_ratio)
+  train_df = df.iloc[:split_idx].copy()
+  test_df = df.iloc[split_idx:].copy()
+
+  if len(train_df) < 40 or len(test_df) < 20:
+    return None
+
+  best_score = -999.0
+  best_params = None
+  best_is_metric = None
+
+  for sma_p in [10, 15, 20]:
+    for tp_m in [2.0, 3.0, 4.0]:
+      for sl_m in [1.0, 1.5, 2.0]:
+        if not is_short:
+          res_is = backtest_atr_engine(train_df, sma_p, tp_m, sl_m)
+        else:
+          res_is = backtest_short_atr_engine(train_df, sma_p, tp_m, sl_m)
+
+        if res_is and res_is['return_pct'] > 0 and res_is['win_rate'] >= 50.0:
+          score = res_is['sharpe_ratio'] * 0.6 + res_is['profit_factor'] * 0.4
+          if score > best_score:
+            best_score = score
+            best_params = (sma_p, tp_m, sl_m)
+            best_is_metric = res_is
+
+  if not best_params:
+    return None
+
+  opt_sma, opt_tp_m, opt_sl_m = best_params
+  if not is_short:
+    res_oos = backtest_atr_engine(test_df, opt_sma, opt_tp_m, opt_sl_m)
+  else:
+    res_oos = backtest_short_atr_engine(test_df, opt_sma, opt_tp_m, opt_sl_m)
+
+  if res_oos and res_oos['return_pct'] > 0 and res_oos['win_rate'] >= 50.0:
+    latest_close = df['Close'].iloc[-1]
+    latest_atr = df['ATR'].iloc[-1]
+    latest_adx = df['ADX'].iloc[-1]
+    poc_price = df['POC_Price'].iloc[-1]
+
+    if not is_short:
+      calc_tp = latest_close + (opt_tp_m * latest_atr)
+      calc_sl = latest_close - (opt_sl_m * latest_atr)
+      tp_pct = ((calc_tp - latest_close) / latest_close) * 100
+      sl_pct = ((latest_close - calc_sl) / latest_close) * 100
+    else:
+      calc_tp = latest_close - (opt_tp_m * latest_atr)
+      calc_sl = latest_close + (opt_sl_m * latest_atr)
+      tp_pct = ((latest_close - calc_tp) / latest_close) * 100
+      sl_pct = ((calc_sl - latest_close) / latest_close) * 100
+
+    return {
+        'symbol': symbol,
+        'current_price': latest_close,
+        'poc_price': round(poc_price, 4),
+        'adx': round(latest_adx, 1),
+        'opt_sma': opt_sma,
+        'opt_tp_m': opt_tp_m,
+        'opt_sl_m': opt_sl_m,
+        'is_return': best_is_metric['return_pct'],
+        'is_win': best_is_metric['win_rate'],
+        'oos_return': res_oos['return_pct'],
+        'oos_win': res_oos['win_rate'],
+        'sharpe_ratio': res_oos['sharpe_ratio'],
+        'profit_factor': res_oos['profit_factor'],
+        'tp_price': round(calc_tp, 4),
+        'sl_price': round(calc_sl, 4),
+        'tp_pct': round(tp_pct, 2),
+        'sl_pct': round(sl_pct, 2),
     }
-    
-    df_results = pd.DataFrame(mock_data)
-    
-    # 테이블 출력
-    st.dataframe(df_results, use_container_width=True)
-    
-    st.markdown("### ⚡ 개별 종목 실행 패널")
-    col_l, col_r = st.columns(2)
-    
-    with col_l:
-        st.markdown("#### 🚀 롱(LONG) 포지션 집행")
-        target_long_coin = st.selectbox("롱 진입 대상 선택", ["SOL/USDT", "ETH/USDT", "XRP/USDT"], key="long_select")
-        if st.button(f"🟢 [{target_long_coin}] 롱 포지션 자동 주문 실행"):
-            if macro_status_color == "red":
-                st.warning("⚠️ 시장 날씨가 '위험' 상태이므로 롱 주문이 차단되었습니다!")
-            else:
-                st.success(f"성공: {target_long_coin} 롱 포지션(레버리지 {leverage}배) 진입 주문이 전송되었습니다.")
-                
-    with col_r:
-        st.markdown("#### 📉 숏(SHORT) 포지션 집행")
-        target_short_coin = st.selectbox("숏 진입 대상 선택", ["DOGE/USDT", "XRP/USDT"], key="short_select")
-        if st.button(f"🔴 [{target_short_coin}] 숏 포지션 자동 주문 실행"):
-            st.info(f"알림: {target_short_coin} 숏 포지션 주문 모드가 작동되었습니다.")
+  return None
+
+
+def analyze_single_symbol_momentum(
+    exchange, symbol, train_ratio=0.7, is_short=False
+):
+  df = fetch_ohlcv_full(exchange, symbol)
+  if df.empty or len(df) < 60:
+    return None
+
+  split_idx = int(len(df) * train_ratio)
+  train_df = df.iloc[:split_idx].copy()
+  test_df = df.iloc[split_idx:].copy()
+
+  if len(train_df) < 40 or len(test_df) < 20:
+    return None
+
+  best_score = -999.0
+  best_params = None
+  best_is_metric = None
+
+  for sma_p in [10, 15, 20]:
+    for tp_m in [2.0, 3.0, 4.0]:
+      for sl_m in [1.0, 1.5, 2.0]:
+        res_is = backtest_momentum_engine(
+            train_df, sma_p, tp_m, sl_m, is_short=is_short
+        )
+        if res_is and res_is['return_pct'] >= 0:
+          score = res_is['sharpe_ratio'] * 0.6 + res_is['profit_factor'] * 0.4
+          if score > best_score:
+            best_score = score
+            best_params = (sma_p, tp_m, sl_m)
+            best_is_metric = res_is
+
+  if not best_params:
+    return None
+
+  opt_sma, opt_tp_m, opt_sl_m = best_params
+  res_oos = backtest_momentum_engine(
+      test_df, opt_sma, opt_tp_m, opt_sl_m, is_short=is_short
+  )
+
+  if res_oos and res_oos['return_pct'] >= -2.0:
+    latest_close = df['Close'].iloc[-1]
+    latest_atr = df['ATR'].iloc[-1]
+    latest_adx = df['ADX'].iloc[-1]
+    poc_price = df['POC_Price'].iloc[-1]
+
+    if not is_short:
+      calc_tp = latest_close + (opt_tp_m * latest_atr)
+      calc_sl = latest_close - (opt_sl_m * latest_atr)
+      tp_pct = ((calc_tp - latest_close) / latest_close) * 100
+      sl_pct = ((latest_close - calc_sl) / latest_close) * 100
+    else:
+      calc_tp = latest_close - (opt_tp_m * latest_atr)
+      calc_sl = latest_close + (opt_sl_m * latest_atr)
+      tp_pct = ((latest_close - calc_tp) / latest_close) * 100
+      sl_pct = ((calc_sl - latest_close) / latest_close) * 100
+
+    return {
+        'symbol': symbol,
+        'current_price': latest_close,
+        'poc_price': round(poc_price, 4),
+        'adx': round(latest_adx, 1),
+        'opt_sma': opt_sma,
+        'opt_tp_m': opt_tp_m,
+        'opt_sl_m': opt_sl_m,
+        'is_return': best_is_metric['return_pct'],
+        'is_win': best_is_metric['win_rate'],
+        'oos_return': res_oos['return_pct'],
+        'oos_win': res_oos['win_rate'],
+        'sharpe_ratio': res_oos['sharpe_ratio'],
+        'profit_factor': res_oos['profit_factor'],
+        'tp_price': round(calc_tp, 4),
+        'sl_price': round(calc_sl, 4),
+        'tp_pct': round(tp_pct, 2),
+        'sl_pct': round(sl_pct, 2),
+    }
+
+  return None
 
 
 # ==========================================
-# 3. 메인 앱 실행 함수
+# 3. 멀티스레드 병렬 탐색기들[cite: 1]
 # ==========================================
-def main():
-    # 1. 최상단 거시 날씨 판넬 실행 및 상태 색상 가져오기
-    macro_color = render_advanced_macro_weather_panel()
-    
-    # 2. 하단 알트코인 추천 및 집행 엔진 실행
-    render_altcoin_trading_engine(macro_color)
+def run_pipeline_parallel(
+    exchange, target_symbols, is_momentum=False, is_short=False
+):
+  results = []
+  completed = 0
+  total = len(target_symbols)
 
-if __name__ == "__main__":
-    main()
+  analyzer_func = (
+      analyze_single_symbol_momentum
+      if is_momentum
+      else analyze_single_symbol_full
+  )
+
+  with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    future_map = {
+        executor.submit(analyzer_func, exchange, sym, 0.7, is_short): sym
+        for sym in target_symbols
+    }
+    for future in concurrent.futures.as_completed(future_map):
+      completed += 1
+      res = future.result()
+      if res:
+        results.append(res)
+
+  if results:
+    return pd.DataFrame(results).sort_values(
+        by='sharpe_ratio', ascending=False
+    )
+  return pd.DataFrame()
+
+
+# ==========================================
+# 4. Streamlit UI 메인 화면[cite: 1]
+# ==========================================
+st.title("🔥 추천 대시보드")
+st.caption(
+    "1번(패턴 검증)과 2·3번(고도화 모멘텀 엔진) 분석 버튼을 분리하여 원하는"
+    " 분석만 빠르게 실행합니다."
+)
+
+# 🌟 최상단에 거시 유동성 및 마켓 날씨 판넬 추가
+render_advanced_macro_weather_panel()
+
+df_all, exchange = load_market_data()
+
+if not df_all.empty and exchange is not None:
+  majors_df = df_all[df_all['base'].isin(TOP_MAJORS)]
+  others_df = (
+      df_all[~df_all['base'].isin(TOP_MAJORS)]
+      .sort_values(by='change_pct', ascending=False)
+      .head(20)
+  )
+  target_df = (
+      pd.concat([majors_df, others_df])
+      .drop_duplicates(subset=['symbol'])
+      .reset_index(drop=True)
+  )
+
+  all_symbols = target_df['symbol'].tolist()
+  major_symbols = (
+      target_df[target_df['base'].isin(TOP_MAJORS)]['symbol'].tolist()
+  )
+
+  # --- 메인 상단 제어 패널 (분리된 분석 버튼들) ---[cite: 1]
+  st.markdown("---")
+  col_btn1, col_btn2, col_btn3 = st.columns(3)
+
+  with col_btn1:
+    if st.button("🎯 1번 분석 실행 (패턴 검증)", use_container_width=True, type="primary"):
+      with st.spinner("⏳ [1번] 전체 대상 패턴 검증 엔진 가동 중 (다소 시간 소요)..."):
+        st.session_state['long_tab1'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=False, is_short=False
+        )
+        st.session_state['short_tab1'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=False, is_short=True
+        )
+        st.session_state['analyzed_1'] = True
+      st.success("🎯 1번 분석이 완료되었습니다!")
+
+  with col_btn2:
+    if st.button("🚀 2·3번 통합 분석 실행 (모멘텀 엔진)", use_container_width=True, type="primary"):
+      with st.spinner("⚡ [2·3번] 메이저 및 전체 코인 모멘텀 엔진 가동 중..."):
+        st.session_state['long_tab2'] = run_pipeline_parallel(
+            exchange, major_symbols, is_momentum=True, is_short=False
+        )
+        st.session_state['short_tab2'] = run_pipeline_parallel(
+            exchange, major_symbols, is_momentum=True, is_short=True
+        )
+        st.session_state['long_tab3'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=True, is_short=False
+        )
+        st.session_state['short_tab3'] = run_pipeline_parallel(
+            exchange, all_symbols, is_momentum=True, is_short=True
+        )
+        st.session_state['analyzed_23'] = True
+      st.success("🚀 2·3번 통합 분석이 완료되었습니다!")
+
+  with col_btn3:
+    if st.button("🔄 데이터 새로고침", use_container_width=True):
+      st.cache_data.clear()
+      st.rerun()
+  st.markdown("---")
+
+  tab_full, tab_major, tab_all = st.tabs([
+      "🎯 통합 AI 추천 (패턴 검증)",
+      "👑 메이저 정밀분석 추천 (고도화 엔진)",
+      "🤖 전체 코인 정밀분석 추천 (고도화 엔진)",
+  ])
+
+
+  def render_dual_results(long_key, short_key, section_title, is_checked):
+    st.subheader(section_title)
+    if not st.session_state.get(is_checked, False):
+      st.info("상단에서 해당하는 **분석 실행 버튼**을 눌러 데이터를 불러오세요.")
+      return
+
+    col_long, col_short = st.columns(2)
+
+    # 롱 포지션 영역[cite: 1]
+    with col_long:
+      st.markdown("### 📈 롱 (Long) 추천 종목")
+      res_long = st.session_state.get(long_key, pd.DataFrame())
+      if not res_long.empty:
+        st.success(f"총 {len(res_long)}개 롱 후보 도출")
+        for _, item in res_long.iterrows():
+          with st.expander(
+              f"🟢 **{item['symbol']}** | WFO: `+{item['oos_return']}%` | TP:"
+              f" `${item['tp_price']:,.4f}` | SL: `${item['sl_price']:,.4f}`",
+              expanded=False,
+          ):
+            st.markdown(f"""
+                        * **현재가:** `${item['current_price']:,.4f}`
+                        * **최적 SMA / ADX:** `{item['opt_sma']}일` / `{item['adx']}`
+                        * **WFO 검증 수익률:** `+{item['oos_return']}%` (승률 {item['oos_win']}%)
+                        * **샤프 / 팩터:** `{item['sharpe_ratio']}` / `{item['profit_factor']}`
+                        * **매물대 (POC):** `${item['poc_price']:,.4f}`
+                        * **목표가 (TP):** `${item['tp_price']:,.4f}` (+{item['tp_pct']}%)
+                        * **손절가 (SL):** `${item['sl_price']:,.4f}` (-{item['sl_pct']}%)
+                        """)
+      else:
+        st.warning("조건에 맞는 롱 종목이 없습니다.")
+
+    # 숏 포지션 영역[cite: 1]
+    with col_short:
+      st.markdown("### 📉 숏 (Short) 추천 종목")
+      res_short = st.session_state.get(short_key, pd.DataFrame())
+      if not res_short.empty:
+        st.error(f"총 {len(res_short)}개 숏 후보 도출")
+        for _, item in res_short.iterrows():
+          with st.expander(
+              f"🔴 **{item['symbol']}** | WFO: `+{item['oos_return']}%` | TP:"
+              f" `${item['tp_price']:,.4f}` | SL: `${item['sl_price']:,.4f}`",
+              expanded=False,
+          ):
+            st.markdown(f"""
+                        * **현재가:** `${item['current_price']:,.4f}`
+                        * **최적 SMA / ADX:** `{item['opt_sma']}일` / `{item['adx']}`
+                        * **WFO 검증 수익률:** `+{item['oos_return']}%` (승률 {item['oos_win']}%)
+                        * **샤프 / 팩터:** `{item['sharpe_ratio']}` / `{item['profit_factor']}`
+                        * **매물대 (POC):** `${item['poc_price']:,.4f}`
+                        * **목표가 (TP):** `${item['tp_price']:,.4f}` (-{item['tp_pct']}%)
+                        * **손절가 (SL):** `${item['sl_price']:,.4f}` (+{item['sl_pct']}%)
+                        """)
+      else:
+        st.warning("조건에 맞는 숏 종목이 없습니다.")
+
+
+  with tab_full:
+    render_dual_results(
+        'long_tab1',
+        'short_tab1',
+        "🎯 전체 대상 통합 AI 추천 (패턴 검증)",
+        'analyzed_1',
+    )
+
+  with tab_major:
+    render_dual_results(
+        'long_tab2',
+        'short_tab2',
+        "👑 메이저 정밀분석 추천 (고도화 모멘텀 엔진)",
+        'analyzed_23',
+    )
+
+  with tab_all:
+    render_dual_results(
+        'long_tab3',
+        'short_tab3',
+        "🤖 전체 코인 정밀분석 추천 (고도화 모멘텀 엔진)",
+        'analyzed_23',
+    )
