@@ -703,7 +703,7 @@ def run_pipeline_parallel(exchange, target_symbols, is_momentum=False, is_short=
 # ==========================================
 # 4. Streamlit UI 메인 화면
 # ==========================================
-st.title("🔥 Bitget 전용 AI 추천 대시보드")
+st.title("🔥 대시보드")
 st.caption("Bitget 거래소 데이터 기준으로만 종목을 스캔하고 검증합니다.")
 
 # 마켓 타입 선택 사이드바 (선물/현물)
